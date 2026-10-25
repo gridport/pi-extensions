@@ -286,23 +286,55 @@ export function redactLine(line: string, keys: string[]): string {
   return out + cr;
 }
 
-/** Redacts a secret file's text, line by line, dropping the body of any private-key block. */
-export function redactText(text: string, keys: string[]): string {
-  const out: string[] = [];
-  let inKey = false;
-  for (const line of text.split("\n")) {
-    if (inKey) {
-      if (PEM_END.test(line)) inKey = false;
-      continue;
-    }
-    if (PEM_BEGIN.test(line) && !PEM_END.test(line)) {
-      inKey = true;
+// A diff's hunk header, without the context git adds after it.
+const HUNK = /^@@+ [^@]*@@+/;
+
+/**
+ * Redacts a secret file's lines, dropping each private-key block but its BEGIN
+ * line, kept as a mark. A block may be open where the lines start: `inKey`
+ * says one is. Past a hunk header or codemode's omission marker, the lines may
+ * start inside a block whose BEGIN they don't show, so an END with no BEGIN
+ * drops the lines back to there. The line after the marker is part of a line,
+ * whose name may be cut off, so it becomes the mark.
+ */
+function redactKeys(lines: string[], keys: string[], inKey = false): string[] {
+  const out: (string | undefined)[] = [];
+  let from = 0;
+  let partial = false;
+  for (const line of lines) {
+    if (HUNK.test(line) || isOmission(line)) {
+      out.push(redactLine(line, keys));
+      [inKey, from, partial] = [false, out.length, isOmission(line)];
+    } else if (inKey) {
+      out.push(undefined);
+      inKey = !PEM_END.test(line);
+    } else if (partial && line) {
+      out.push(MARK);
+      partial = false;
+    } else if (PEM_BEGIN.test(line) && !PEM_END.test(line)) {
       out.push(redactLine(line.replace(PEM_REST, MARK), keys));
-      continue;
-    }
-    out.push(redactLine(line.replace(PEM_INLINE, MARK), keys));
+      inKey = true;
+    } else if (PEM_END.test(line) && !PEM_BEGIN.test(line)) {
+      out.fill(undefined, from).push(undefined);
+      from = out.length;
+    } else out.push(redactLine(line.replace(PEM_INLINE, MARK), keys));
   }
-  return out.join("\n");
+  return out.filter((line) => line !== undefined);
+}
+
+/** Whether lines end inside a private-key block. */
+function endsInKey(lines: string[]): boolean {
+  let inKey = false;
+  for (const line of lines) inKey = inKey ? !PEM_END.test(line) : PEM_BEGIN.test(line) && !PEM_END.test(line);
+  return inKey;
+}
+
+/**
+ * Redacts a secret file's text, line by line, dropping the body of any
+ * private-key block. `inKey` says the text starts inside one.
+ */
+export function redactText(text: string, keys: string[], inKey = false): string {
+  return redactKeys(text.split("\n"), keys, inKey).join("\n");
 }
 
 /**
@@ -371,10 +403,15 @@ function endsInSection(lines: string[], opens: Opens): boolean {
 
 /**
  * Where text pi cut off resumes: inSection when it starts inside a protected
- * diff section, inSecret inside a secret file's, afterOmission for the state
- * after an omission marker.
+ * diff section, inSecret inside a secret file's, inKey inside a private-key
+ * block, and afterOmission the sections after an omission marker.
  */
-type Cut = { inSection?: boolean; inSecret?: boolean; afterOmission?: boolean };
+type Cut = {
+  inSection?: boolean;
+  inSecret?: boolean;
+  inKey?: boolean;
+  afterOmission?: { inSection: boolean; inSecret: boolean };
+};
 
 /**
  * Removes lines that name a path into a protected folder, and the whole git diff
@@ -392,7 +429,7 @@ export function dropProtected(text: string, folders: string[], cut: Cut = {}): s
   for (const line of lines) {
     if (isOmission(line)) {
       kept.push(line);
-      inSection = cut.afterOmission ?? inSection;
+      inSection = cut.afterOmission?.inSection ?? inSection;
       partial = true;
       continue;
     }
@@ -408,20 +445,38 @@ export function dropProtected(text: string, folders: string[], cut: Cut = {}): s
 
 /**
  * Redacts the git diff section of a secret file, which git diff and git log -p
- * print though the command names no secret file. redactLine reads a diff's
- * lines past their markers and hunk headers. For text pi cut off, `cut` says
- * where it resumes.
+ * print though the command names no secret file, and drops its private-key
+ * blocks. redactLine reads a diff's lines past their markers. A hunk header
+ * loses its context, which git takes from a line before the hunk, and so may
+ * be one inside a key. For text pi cut off, `cut` says where it resumes.
  */
 function redactDiffs(text: string, cfg: Config, cut: Cut = {}): string {
   const opens = (line: string) => opensSecretSection(line, cfg);
+  const out: string[] = [];
   let inSecret = cut.inSecret ?? false;
-  return text
-    .split("\n")
-    .map((line) => {
-      inSecret = nextSection(line, inSecret, opens);
-      return inSecret ? redactLine(line, cfg.redactKeys) : line;
-    })
-    .join("\n");
+  let inKey = inSecret && (cut.inKey ?? false);
+  // The lines of the secret section so far, redacted together when it ends.
+  let section: string[] = [];
+  const flush = () => {
+    // One push per line: spreading a long section into push overflows the stack.
+    for (const line of redactKeys(section, cfg.redactKeys, inKey)) out.push(line);
+    [section, inKey] = [[], false];
+  };
+  let partial = false;
+  for (const line of text.split("\n")) {
+    let next = inSecret;
+    if (isOmission(line)) {
+      next = cut.afterOmission?.inSecret ?? inSecret;
+      partial = true;
+    } else if (partial && line) partial = false;
+    else next = nextSection(line, inSecret, opens);
+    if (DIFF_HEADER.test(line) || next !== inSecret) flush();
+    inSecret = next;
+    if (inSecret) section.push(HUNK.exec(line)?.[0] ?? line);
+    else out.push(line);
+  }
+  flush();
+  return out.join("\n");
 }
 
 /**
@@ -462,17 +517,22 @@ function writesMark(command: string, cfg: Config): boolean {
 /**
  * Where a copy of a tool's output that pi cut off resumes, from what pi left
  * out of it: a bash command's tail, or a read from an offset, may start inside
- * a protected or secret file's diff section, and the middle part codemode's
- * copy leaves out may open one.
+ * a protected or secret file's diff section or a private-key block, and the
+ * middle part codemode's copy leaves out may open a section.
  */
 function cutOf({ head, middle }: LeftOut, cfg: Config): Cut {
   const opens = (line: string) => opensSection(line, cfg.folders);
+  const opensSecret = (line: string) => opensSecretSection(line, cfg);
   return {
     inSection: endsInSection(head, opens),
-    inSecret: endsInSection(head, (line) => opensSecretSection(line, cfg)),
-    afterOmission: middle?.some(opens),
+    inSecret: endsInSection(head, opensSecret),
+    inKey: endsInKey(head),
+    afterOmission: middle && { inSection: middle.some(opens), inSecret: middle.some(opensSecret) },
   };
 }
+
+/** Whether text pi cut off resumes inside a private-key block outside a diff section, whose block is the section's. */
+const keyOpen = (cut: Cut) => !!cut.inKey && !cut.inSection && !cut.inSecret;
 
 /**
  * Whether a path is pi's file of a bash command's full output, holding a
@@ -560,20 +620,23 @@ export default function (pi: ExtensionAPI) {
       // so a project's redactFiles can't skip the filtering.
       if (isBashLog(path)) {
         const cut = cutOf(leftOut(event, ctx.cwd).text, cfg);
-        text = (t) => redactText(output(cut)(t), cfg.redactKeys);
-      } else if (isSecretFile(path, cfg)) text = (t) => redactText(t, cfg.redactKeys);
+        text = (t) => redactText(output(cut)(t), cfg.redactKeys, keyOpen(cut));
+      } else if (isSecretFile(path, cfg)) {
+        const { inKey } = cutOf(leftOut(event, ctx.cwd).text, cfg);
+        text = (t) => redactText(t, cfg.redactKeys, inKey);
+      }
     } else if (event.toolName === "grep" || event.toolName === "find") {
       text = output({});
     } else if (event.toolName === "bash") {
       const prints = printsSecrets(String(event.input.command ?? ""), ctx.cwd, cfg);
       const left = leftOut(event, ctx.cwd);
       const cut = { text: cutOf(left.text, cfg), structured: cutOf(left.structured, cfg) };
-      const redact = (kept: string) => {
+      const redact = (kept: string, from: Cut) => {
         if (prints === "values") return kept.replace(/^.*\S.*$/gm, MARK);
-        return prints ? redactText(kept, cfg.redactKeys) : kept;
+        return prints ? redactText(kept, cfg.redactKeys, keyOpen(from)) : kept;
       };
-      text = (t) => redact(output(cut.text)(t));
-      structured = (t) => redact(output(cut.structured)(t));
+      text = (t) => redact(output(cut.text)(t), cut.text);
+      structured = (t) => redact(output(cut.structured)(t), cut.structured);
     }
     return text && patchResult(event, text, structured);
   });

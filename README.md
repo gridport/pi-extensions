@@ -65,7 +65,9 @@ Settings go under `secretGuard` in `settings.json`:
 **Secret files:** these become `[REDACTED]` in what `read`, `grep` and bash return, `grep`, `rg`, `cat -n` and `diff` lines included, in a secret file's `git diff` and `git log -p` sections in bash output and pi's file of it, even when the command doesn't name the file, and in the output of `env`, `printenv`, `export` and `declare`:
 - the values of secret-looking names;
 - passwords inside URLs;
-- private-key blocks, PGP ones included.
+- private-key blocks, PGP ones included, even when only part of one shows, such as a `read` from inside it or a `tail` of it.
+
+In a secret file's diff section, a hunk header loses the text git adds after it, which comes from a line before the hunk and may be one inside a key.
 
 `printenv NAME` prints a bare value, so when the name looks secret, its whole output is redacted. pi saves a long bash output to a file and tells the agent to read it. Whatever the command, what `read`, `grep` or a bash command that names that file returns is redacted the same way. Writing `[REDACTED]` into a secret file is refused, so a redacted copy can't replace the real one.
 
@@ -102,7 +104,7 @@ The guards catch accidents. They don't sandbox a determined agent. Some things t
 - a bare value, as `printenv NAME` prints it, in pi's file of a long output, and any value in that file when a command names it through a glob;
 - a secret file's diff saved to a file, such as `git diff > changes.diff`, then opened with `read` or `grep`;
 - a secret printed some other way, such as `echo $API_KEY`, or in a format they don't parse, such as `rg --json` or `rg --heading`;
-- the lines after the first of a multi-line quoted value, and a `read` that starts in the middle of a private-key block;
+- the lines after the first of a multi-line quoted value, and the middle of a private-key block shown without its BEGIN or END line, as `sed -n 5,10p` of a key file or a diff hunk inside one shows it;
 - pi's optional `powershell` tool, which neither guard checks;
 - for command-guard, deletions it doesn't model, such as `find -exec sh -c 'rm -rf …'` or `fd -X rm -rf`.
 

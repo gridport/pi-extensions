@@ -197,6 +197,22 @@ test("a line of pi's log nested in itself is redacted in bounded time", () => {
   assert.ok(performance.now() - started < 500, "a 1.1 MB line took over 500 ms");
 });
 
+test("many END lines with no BEGIN are redacted in bounded time", () => {
+  // Each drops the lines back to where a block could have started unseen.
+  const ends = Array.from({ length: 100_000 }, () => "-----END RSA PRIVATE KEY-----").join("\n");
+  const started = performance.now();
+  assert.equal(redactText(ends, K), "");
+  assert.ok(performance.now() - started < 500, "100,000 END lines took over 500 ms");
+});
+
+test("a secret file's diff section of many lines is redacted", async () => {
+  const g = load(ext);
+  await g.start(repo());
+  const diff = `diff --git a/.env b/.env\n${"+API_KEY=sk\n".repeat(200_000)}`;
+  const out = g.result("bash", { command: "git diff" }, diff).content[0].text;
+  assert.equal(out, `diff --git a/.env b/.env\n${`+API_KEY=${MARK}\n`.repeat(200_000)}`);
+});
+
 test("settings: a project can add folders and keys but not remove them", () => {
   assert.deepEqual(loadConfig(undefined, undefined), DEFAULTS);
   const own = loadConfig(undefined, { folders: ["private"] });
@@ -365,9 +381,10 @@ test("a secret file's diff is redacted, even when the command doesn't name it", 
     "diff --git a/docs/setup.md b/docs/setup.md",
     "+API_KEY=your-key-here",
   ];
+  // A hunk header's context, which git takes from a line before the hunk, is left out.
   const want = [
     ...diff.slice(0, 4),
-    `@@ -1,3 +1,3 @@ STRIPE_SECRET=${MARK}`,
+    "@@ -1,3 +1,3 @@",
     " PORT=80",
     `-API_KEY=${MARK}`,
     `+API_KEY=${MARK}`,
@@ -399,7 +416,12 @@ test("a secret file's diff is redacted, even when the command doesn't name it", 
       `pi-bash-5e5e.log:5: ${hunk}=${MARK}`,
     ],
     ["bash", { command: `grep -n '^@@' ${log}` }, `5:${hunk}=sk_ctx`, `5:${hunk}=${MARK}`],
-    ["bash", { command: `sed -n 5,8p ${log}` }, diff.slice(4, 8).join("\n"), want.slice(4, 8).join("\n")],
+    [
+      "bash",
+      { command: `sed -n 5,8p ${log}` },
+      diff.slice(4, 8).join("\n"),
+      [`${hunk}=${MARK}`, ...want.slice(5, 8)].join("\n"),
+    ],
   ] as const)
     assert.equal(g.result(tool, input, out).content[0].text, redacted, JSON.stringify(input));
   // A command that names the file, in diff's other formats.
@@ -433,7 +455,142 @@ test("a secret file's diff is redacted, even when the command doesn't name it", 
   const merge = "diff --cc .env\n@@@ -1,2 -1,2 +1,2 @@@ STRIPE_SECRET=sk_ctx\n++API_KEY=sk-merged";
   assert.equal(
     g.result("bash", { command: "git log -p -1" }, merge).content[0].text,
-    `diff --cc .env\n@@@ -1,2 -1,2 +1,2 @@@ STRIPE_SECRET=${MARK}\n++API_KEY=${MARK}`,
+    `diff --cc .env\n@@@ -1,2 -1,2 +1,2 @@@\n++API_KEY=${MARK}`,
+  );
+  // Its hunk line grepped from pi's file, with no header in view.
+  assert.equal(
+    g.result("bash", { command: `grep -n '^@@@' ${log}` }, "2:@@@ -1,2 -1,2 +1,2 @@@ STRIPE_SECRET=sk_ctx")
+      .content[0].text,
+    `2:@@@ -1,2 -1,2 +1,2 @@@ STRIPE_SECRET=${MARK}`,
+  );
+});
+
+test("a private-key block is dropped, though only part of it shows", async () => {
+  const g = load(ext, { settings: { secretGuard: { redactFiles: ["*.pem"] } } });
+  await g.start(repo());
+  const shown = (tool: string, input: Record<string, unknown>, out: string, details?: unknown) =>
+    g.result(tool, input, out, undefined, details)?.content?.[0].text ?? out;
+  const [begin, end] = ["-----BEGIN RSA PRIVATE KEY-----", "-----END RSA PRIVATE KEY-----"];
+  const env = ["A=1", `PRIVATE_KEY="${begin}`, "MIIEbody1", "MIIEbody2", `${end}"`, "B=2"];
+  const file = join(repo(), ".env.key");
+  writeFileSync(file, env.join("\n"));
+  // A read from an offset inside the block, and a command that prints its end.
+  assert.equal(shown("read", { path: file, offset: 3, limit: 2 }, env.slice(2, 4).join("\n")), "");
+  assert.equal(shown("bash", { command: `tail -n 3 ${file}` }, env.slice(3).join("\n")), "B=2");
+  // pi's tail of a long output that ends inside the block, and the model reading pi's file from inside it.
+  const log = join(root, "pi-bash-c0de.log");
+  writeFileSync(log, env.slice(0, 4).join("\n"));
+  const details = { truncation: { truncated: true, totalLines: 4, outputLines: 2 }, fullOutputPath: log };
+  const notice = `[Showing lines 3-4 of 4. Full output: ${log}]`;
+  const tail = `${env.slice(2, 4).join("\n")}\n\n${notice}`;
+  assert.equal(shown("bash", { command: `head -n 4 ${file}` }, tail, details), `\n\n${notice}`);
+  assert.equal(shown("read", { path: log, offset: 3 }, env.slice(2, 4).join("\n")), "");
+  // codemode's copy starts at the head.
+  const copy = g.result(
+    "bash",
+    { command: `head -n 4 ${file}` },
+    tail,
+    { output: env.slice(0, 4).join("\n") },
+    details,
+  );
+  assert.equal(copy.structuredContent.output, `A=1\nPRIVATE_KEY=${MARK}`);
+
+  // A secret file's diff: a new key file; a later hunk after one that ended
+  // inside a key; a section that ends inside one; and a change after a key,
+  // whose hunk starts inside it. git takes a hunk header's context from a line
+  // before the hunk, which may be inside a key.
+  const diff = [
+    "diff --git a/k.pem b/k.pem",
+    "--- /dev/null",
+    "+++ b/k.pem",
+    "@@ -0,0 +1,4 @@",
+    `+${begin}`,
+    "+MIIEbody1",
+    "+MIIEbody2",
+    `+${end}`,
+    "diff --git a/.env.prod b/.env.prod",
+    "@@ -1,2 +1,2 @@",
+    `-PRIVATE_KEY="${begin}`,
+    `+PRIVATE_KEY="${begin}`,
+    "@@ -20,2 +20,2 @@ MIIEbody9",
+    "-C=1",
+    "+C=2",
+    "@@ -30 +30 @@",
+    `+KEY2="${begin}`,
+    "diff --git a/.env b/.env",
+    "--- a/.env",
+    "+++ b/.env",
+    "@@ -3,3 +3,3 @@ MIIEbody1",
+    " MIIEbody2",
+    ` ${end}"`,
+    "-B=2",
+    "+B=3",
+    "diff --git a/README.md b/README.md",
+    "+hello",
+  ];
+  const want = [
+    ...diff.slice(0, 4),
+    `+${MARK}`,
+    ...diff.slice(8, 10),
+    `-PRIVATE_KEY=${MARK}`,
+    "@@ -20,2 +20,2 @@",
+    "-C=1",
+    "+C=2",
+    "@@ -30 +30 @@",
+    `+KEY2=${MARK}`,
+    ...diff.slice(17, 20),
+    "@@ -3,3 +3,3 @@",
+    "-B=2",
+    "+B=3",
+    ...diff.slice(25),
+  ];
+  assert.equal(shown("bash", { command: "git diff" }, diff.join("\n")), want.join("\n"));
+  // pi's file of it, read from inside a key in one section; the next section's lines are kept.
+  const keys = join(root, "pi-bash-c0df.log");
+  writeFileSync(keys, diff.join("\n"));
+  assert.equal(shown("read", { path: keys, offset: 6, limit: 2 }, diff.slice(5, 7).join("\n")), "");
+  assert.equal(
+    shown("read", { path: keys, offset: 6, limit: 5 }, diff.slice(5, 10).join("\n")),
+    diff.slice(8, 10).join("\n"),
+  );
+  // The same, inside a protected file's section.
+  const vault = [
+    "diff --git a/vault/k.txt b/vault/k.txt",
+    `+${begin}`,
+    "+MIIEbody1",
+    `+${end}`,
+    ...diff.slice(25),
+  ];
+  writeFileSync(keys, vault.join("\n"));
+  assert.equal(
+    shown("read", { path: keys, offset: 3 }, vault.slice(2).join("\n")),
+    [...diff.slice(25), REMOVED(2)].join("\n"),
+  );
+});
+
+test("codemode's copy resumes inside a secret file's section that opens in the part it leaves out", async () => {
+  const g = load(ext);
+  await g.start(repo());
+  const lines = [
+    "diff --git a/b.md b/b.md",
+    "+ok",
+    "diff --git a/.env b/.env",
+    "+API_KEY_0ab1c2d3=tok-1",
+    "+PASSWORD=pw-2",
+    "diff --git a/c.md b/c.md",
+    "+fine",
+  ];
+  const log = join(root, "pi-bash-c0e0.log");
+  writeFileSync(log, lines.join("\n"));
+  const details = { truncation: { truncated: true, totalLines: 7, outputLines: 4 }, fullOutputPath: log };
+  // The tail starts partway through a line, whose name may be cut off; here
+  // what's left looks like a commit line.
+  const omitted = "\n\n[... 9 bytes omitted ...]\n\n";
+  const cut = `${lines.slice(0, 2).join("\n")}${omitted}0ab1c2d3=tok-1\n${lines.slice(4).join("\n")}`;
+  const copy = g.result("bash", { command: "git diff" }, "x", { output: cut, truncated: true }, details);
+  assert.equal(
+    copy.structuredContent.output,
+    `${lines.slice(0, 2).join("\n")}${omitted}${MARK}\n+PASSWORD=${MARK}\n${lines.slice(5).join("\n")}`,
   );
 });
 
