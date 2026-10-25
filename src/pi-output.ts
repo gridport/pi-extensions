@@ -43,14 +43,17 @@ export const toolPath = (input: Record<string, unknown>) =>
 
 /**
  * A file's bytes, its path resolved as pi resolves a tool's: ~ expanded, or a
- * file URL taken as its path, then from cwd. None if it can't be read.
+ * file URL taken as its path, then from cwd. None if there is no such file. One
+ * that is there but can't be read, such as one over 2 GiB, could hold
+ * anything, so that throws.
  */
 function bytesOf(path: string, cwd: string): Buffer | undefined {
   try {
     const p = path.startsWith("file://") ? fileURLToPath(path) : expandHome(path);
     return readFileSync(resolve(cwd, p));
-  } catch {
-    return undefined;
+  } catch (err) {
+    if ((err as { code?: string }).code === "ENOENT") return undefined;
+    throw err;
   }
 }
 
@@ -82,7 +85,7 @@ function linesIn(buf: Buffer, n = Number.POSITIVE_INFINITY): Iterable<string> {
   };
 }
 
-/** A file's lines, its path resolved as a tool's. None if it can't be read. */
+/** A file's lines, its path resolved as a tool's. None if there is no such file; throws if it can't be read. */
 export function linesOf(path: string, cwd: string): Iterable<string> {
   const buf = bytesOf(path, cwd);
   return buf ? linesIn(buf) : [];

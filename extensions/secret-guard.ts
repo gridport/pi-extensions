@@ -339,7 +339,7 @@ type State = { section: Section; inKey: boolean };
 const START: State = { section: "none", inKey: false };
 
 /**
- * What a line is: a diff header; a commit line; a hunk
+ * What a line is: a diff header; a commit line that ends a section; a hunk
  * header; a line inside a private-key block, END included; a line that opens
  * one; an END with no BEGIN, from a block whose start isn't shown; or other.
  */
@@ -347,13 +347,15 @@ type Role = "header" | "commit" | "hunk" | "key" | "begin" | "end" | "text";
 
 /**
  * A line's role, and the state after it; `kind` says which section a diff
- * header opens. A header, a commit line and a hunk header each end a key
- * block, since none can be part of one, and a hunk may start inside one
- * unseen; a commit line ends a section too.
+ * header opens. A header, a commit line that ends a section and a hunk header
+ * each end a key block, since none can be part of one, and a hunk may start
+ * inside one unseen. Outside a section, a line can start like a commit line
+ * and still hold a key's line, as git blame prints each line of a file after
+ * its commit, so it ends nothing.
  */
 function step(s: State, line: string, kind: (header: string) => Section): [Role, State] {
   if (DIFF_HEADER.test(line)) return ["header", { section: kind(line), inKey: false }];
-  if (COMMIT_LINE.test(line)) return ["commit", START];
+  if (s.section !== "none" && COMMIT_LINE.test(line)) return ["commit", START];
   if (HUNK.test(line)) return ["hunk", { section: s.section, inKey: false }];
   if (s.inKey) return ["key", { section: s.section, inKey: !PEM_END.test(line) }];
   const begins = PEM_BEGIN.test(line);

@@ -60,7 +60,7 @@ Settings go under `secretGuard` in `settings.json`:
 - A bash command that names such a path is refused. That includes `git show HEAD:vault/x` and the code an interpreter runs, whether given to `python -c`, `node -e` or `deno eval`, or piped in from `echo` or a here-document.
 - So is any other tool argument that is one, such as an MCP tool opening `file:///…/vault/x`.
 - Lines that name a protected path are removed from `grep`, `find` and bash output. So are the whole `git diff` and `git log -p` sections of files inside one.
-- pi saves a long bash output to a file and shows only its tail. When that file holds such a section, a bash command or `grep` that names it is refused, even in an interpreter's code, so the agent reads it with `read`, which leaves the section out wherever the read starts. pi's own lines after an output, such as where to find the rest, are always kept. Where pi shows part of a line, as a tail of one long line or around the middle that codemode's copy of an output over 1 MiB leaves out, the part is judged by its whole line in that file. A part of a line over 1 MiB, too long to judge, becomes `[REDACTED]`.
+- pi saves a long bash output to a file and shows only its tail. When that file holds such a section, a bash command or `grep` that names it is refused, even in an interpreter's code, so the agent reads it with `read`, which leaves the section out wherever the read starts. One that names such a file too big to read, over 2 GiB, is refused too. pi's own lines after an output, such as where to find the rest, are always kept. Where pi shows part of a line, as a tail of one long line or around the middle that codemode's copy of an output over 1 MiB leaves out, the part is judged by its whole line in that file. A part of a line over 1 MiB, too long to judge, becomes `[REDACTED]`.
 
 **Secret files:** these become `[REDACTED]` in what `read`, `grep` and bash return, `grep`, `rg`, `cat -n` and `diff` lines and `git show HEAD:.env` included, in a secret file's `git diff` and `git log -p` sections in bash output and pi's file of it, even when the command doesn't name the file, and in the output of `env`, `printenv`, `export` and `declare`:
 - the values of secret-looking names;
@@ -107,7 +107,7 @@ The guards catch accidents. They don't sandbox a determined agent. Some things t
 - code an interpreter reads from a file, or that something other than `echo`, `printf` or a here-document pipes in;
 - a bare value, as `printenv NAME` prints it, in pi's file of a long output, and any value in that file when a command names it through a glob;
 - a secret file's diff saved to a file, such as `git diff > changes.diff`, then opened with `read` or `grep`;
-- a secret printed some other way, such as `echo $API_KEY`, or in a format they don't parse, such as `rg --json` or `rg --heading`;
+- a secret printed some other way, such as `echo $API_KEY`, or in a format they don't parse, such as `rg --json`, `rg --heading` or `git blame`;
 - the lines after the first of a multi-line quoted value, and the middle of a private-key block shown without its BEGIN or END line, as `sed -n 5,10p` of a key file or a diff hunk inside one shows it;
 - pi's optional `powershell` tool, which neither guard checks;
 - for command-guard, deletions it doesn't model, such as `find -exec sh -c 'rm -rf …'` or `fd -X rm -rf`.

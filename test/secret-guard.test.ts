@@ -8,6 +8,7 @@ import {
   realpathSync,
   rmSync,
   symlinkSync,
+  truncateSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -343,6 +344,19 @@ test("redaction", () => {
     drop("diff --git a/.env b/.env\n@@ -1 +1 @@\nadd more\nAPI_KEY=sk-1"),
     `diff --git a/.env b/.env\n@@ -1 +1 @@\nadd more\nAPI_KEY=${MARK}`,
     "a short word of hex letters, as --word-diff may show it, is no commit line",
+  );
+  const blame = (n: number, text: string) => `def5678a (Bob 2026-10-02 10:00:00 +0900 ${n}) ${text}`;
+  assert.equal(
+    secretText(
+      [
+        blame(1, 'SIGNING_KEY="-----BEGIN PRIVATE KEY-----'),
+        blame(2, "MIIEkey1"),
+        blame(3, '-----END PRIVATE KEY-----"'),
+        blame(4, "PORT=80"),
+      ].join("\n"),
+    ),
+    [blame(1, `SIGNING_KEY=${MARK}`), blame(4, "PORT=80")].join("\n"),
+    "git blame starts each line with its commit, which outside a section ends no key block",
   );
   assert.equal(
     grepLines(
@@ -774,6 +788,23 @@ test("a part of a line over 1 MiB, too long to judge, is the mark", async () => 
   assert.equal(tail("cat .env", "-----BEGIN PRIVATE KEY-----", x), `\n\n${notice}`);
   // A line of 1 MiB is judged.
   assert.equal(tail("ls", "1", x.slice(1)), undefined);
+});
+
+test("pi's log too big to read is withheld, and a command can't name it", async () => {
+  const g = load(ext);
+  await g.start(repo());
+  // Sparse, so it takes no room, and over the 2 GiB Node reads at once.
+  const log = join(root, "pi-bash-2b16.log");
+  writeFileSync(log, "");
+  truncateSync(log, 2 ** 31 + 1);
+  const details = { truncation: { truncated: true, totalLines: 2, outputLines: 1 }, fullOutputPath: log };
+  const text = "[secret-guard: withheld this output, which it could not filter (ERR_FS_FILE_TOO_LARGE)]";
+  assert.deepEqual(g.result("bash", { command: "git log -p" }, "+S1", undefined, details), {
+    content: [{ type: "text", text }],
+  });
+  // pi doesn't run a tool whose tool_call handler throws.
+  assert.throws(() => g.call("bash", { command: `cat ${log}` }), { code: "ERR_FS_FILE_TOO_LARGE" });
+  rmSync(log);
 });
 
 test("output the guard can't filter is withheld, since pi would pass it on unfiltered", async () => {
