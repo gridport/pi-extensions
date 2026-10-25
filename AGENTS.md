@@ -1,6 +1,6 @@
 # pi-extensions
 
-One npm package, `@gridport/pi-extensions`, holding three pi extensions in `extensions/`. Code two of them share lives in `src/`. `README.md` says what each does; the `package.json` scripts are the commands.
+One npm package, `@gridport/pi-extensions`, holding three pi extensions in `extensions/`. The modules they import live in `src/`. `README.md` says what each does; the `package.json` scripts are the commands.
 
 ## Checks
 
