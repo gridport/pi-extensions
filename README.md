@@ -60,7 +60,7 @@ Settings go under `secretGuard` in `settings.json`:
 - A bash command that names such a path is refused. That includes `git show HEAD:vault/x` and the code an interpreter runs, whether given to `python -c`, `node -e` or `deno eval`, or piped in from `echo` or a here-document.
 - So is any other tool argument that is one, such as an MCP tool opening `file:///…/vault/x`.
 - Lines that name a protected path are removed from `grep`, `find` and bash output. So are the whole `git diff` and `git log -p` sections of files inside one.
-- pi saves a long bash output to a file and shows only its tail. When that file holds such a section, a bash command or `grep` that names it is refused, even in an interpreter's code, so the agent reads it with `read`, which leaves the section out wherever the read starts. pi's own lines after an output, such as where to find the rest, are always kept. Where pi shows part of a line, as a tail of one long line or around the middle that codemode's copy of an output over 1 MiB leaves out, the part is judged by its whole line in that file.
+- pi saves a long bash output to a file and shows only its tail. When that file holds such a section, a bash command or `grep` that names it is refused, even in an interpreter's code, so the agent reads it with `read`, which leaves the section out wherever the read starts. pi's own lines after an output, such as where to find the rest, are always kept. Where pi shows part of a line, as a tail of one long line or around the middle that codemode's copy of an output over 1 MiB leaves out, the part is judged by its whole line in that file. A part of a line over 1 MiB, too long to judge, becomes `[REDACTED]`.
 
 **Secret files:** these become `[REDACTED]` in what `read`, `grep` and bash return, `grep`, `rg`, `cat -n` and `diff` lines and `git show HEAD:.env` included, in a secret file's `git diff` and `git log -p` sections in bash output and pi's file of it, even when the command doesn't name the file, and in the output of `env`, `printenv`, `export` and `declare`:
 - the values of secret-looking names;
@@ -70,6 +70,8 @@ Settings go under `secretGuard` in `settings.json`:
 In a secret file's diff section, a hunk header loses the text git adds after it, which comes from a line before the hunk and may be one inside a key.
 
 `printenv NAME` prints a bare value, so when the name looks secret, its whole output is redacted. pi saves a long bash output to a file and tells the agent to read it. Whatever the command, what `read`, `grep` or a bash command that names that file returns is redacted the same way. Writing `[REDACTED]` into a secret file is refused, so a redacted copy can't replace the real one.
+
+If filtering an output fails, the guard withholds it, since pi would otherwise pass it on unfiltered.
 
 ## command-guard
 

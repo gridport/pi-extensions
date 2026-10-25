@@ -54,8 +54,39 @@ function bytesOf(path: string, cwd: string): Buffer | undefined {
   }
 }
 
+const NL = 0x0a;
+// How much of a file is decoded at a time; a longer line is decoded whole.
+const CHUNK = 1024 * 1024;
+
+/**
+ * A file's first `n` lines, as slice would count them, or all of them. They are
+ * decoded a chunk at a time as they are read, so a file longer than V8's
+ * longest string reads too, and they can be read more than once.
+ */
+function linesIn(buf: Buffer, n = Number.POSITIVE_INFINITY): Iterable<string> {
+  const count = Math.trunc(n);
+  return {
+    *[Symbol.iterator]() {
+      let i = 0;
+      for (let start = 0; i < count; ) {
+        const nl = buf.indexOf(NL, start + CHUNK);
+        const end = nl < 0 ? buf.length : nl;
+        for (const line of buf.subarray(start, end).toString("utf8").split("\n")) {
+          if (i++ === count) return;
+          yield line;
+        }
+        if (nl < 0) return;
+        start = nl + 1;
+      }
+    },
+  };
+}
+
 /** A file's lines, its path resolved as a tool's. None if it can't be read. */
-export const linesOf = (path: string, cwd: string) => bytesOf(path, cwd)?.toString("utf8").split("\n") ?? [];
+export function linesOf(path: string, cwd: string): Iterable<string> {
+  const buf = bytesOf(path, cwd);
+  return buf ? linesIn(buf) : [];
+}
 
 /** How pi cut a bash command's output for the model: the lines it left out of the head, whether the tail is the end of one long line, and the file that holds it all. */
 type Cut = { hidden: number; partial: boolean; log: string };
@@ -113,15 +144,13 @@ function bashCut(event: ToolOutput): Cut | undefined {
  * and the whole's lines before the copy resumes.
  */
 export interface Placement {
-  before: string[];
+  before: Iterable<string>;
   parts: Map<number, string>;
-  omission?: { at: number; before: string[] };
+  omission?: { at: number; before: Iterable<string> };
 }
 
 /** A copy that is all of a tool's output. */
 export const WHOLE: Placement = { before: [], parts: new Map() };
-
-const NL = 0x0a;
 
 /** How many lines of `buf` end before byte `end`. */
 function linesBefore(buf: Buffer, end: number): number {
@@ -143,7 +172,7 @@ function lineAt(buf: Buffer, i: number): string {
  * cut. pi moves each cut to where a character starts, which keeps it in the
  * same line, since no byte of a character but its first can be a newline.
  */
-function codemodeCopy(log: Buffer, lines: string[]): Placement {
+function codemodeCopy(log: Buffer): Placement {
   if (log.length <= CODEMODE_BYTES) return WHOLE;
   const headEnd = CODEMODE_BYTES / 2;
   const tailStart = log.length - (CODEMODE_BYTES - headEnd);
@@ -151,7 +180,7 @@ function codemodeCopy(log: Buffer, lines: string[]): Placement {
   const parts = new Map<number, string>();
   if (log[headEnd - 1] !== NL) parts.set(at - 2, lineAt(log, headEnd - 1));
   if (log[tailStart - 1] !== NL) parts.set(at + 2, lineAt(log, tailStart));
-  return { before: [], parts, omission: { at, before: lines.slice(0, linesBefore(log, tailStart)) } };
+  return { before: [], parts, omission: { at, before: linesIn(log, linesBefore(log, tailStart)) } };
 }
 
 /**
@@ -165,20 +194,20 @@ function codemodeCopy(log: Buffer, lines: string[]): Placement {
 export function placeOf(event: ToolOutput, cwd: string): { text: Placement; structured: Placement } {
   if (event.toolName === "read") {
     const offset = typeof event.input.offset === "number" ? event.input.offset : 1;
-    const before = offset > 1 ? linesOf(toolPath(event.input) ?? "", cwd).slice(0, offset - 1) : [];
-    const place = { before, parts: new Map() };
+    const file = offset > 1 ? bytesOf(toolPath(event.input) ?? "", cwd) : undefined;
+    const place = { before: file ? linesIn(file, offset - 1) : [], parts: new Map() };
     return { text: place, structured: place };
   }
   const cut = bashCut(event);
   const log = cut && bytesOf(cut.log, cwd);
   if (!cut || !log) return { text: WHOLE, structured: WHOLE };
-  const lines = log.toString("utf8").split("\n");
   const hidden = Math.max(0, cut.hidden);
-  const last = cut.partial ? lines[hidden] : undefined;
-  return {
-    text: { before: lines.slice(0, hidden), parts: new Map(last === undefined ? [] : [[0, last]]) },
-    structured: codemodeCopy(log, lines),
-  };
+  const parts = new Map<number, string>();
+  if (cut.partial) {
+    let i = 0;
+    for (const line of linesIn(log, hidden + 1)) if (i++ === hidden) parts.set(0, line);
+  }
+  return { text: { before: linesIn(log, hidden), parts }, structured: codemodeCopy(log) };
 }
 
 const mapStrings = (v: unknown, f: Rewrite): unknown =>

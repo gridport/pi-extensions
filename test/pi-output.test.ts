@@ -63,7 +63,8 @@ test("a long bash output: its tail, pi's notice under it, and its file of the wh
   assert.ok(!isBashLog(join(fixtures, "notes.log")));
   assert.ok(textOf(out).startsWith("1001\n"));
   const place = placeOf(out, fixtures);
-  assert.deepEqual(place.text, { before: numbers(1, 1000), parts: new Map() }, "the lines before the tail");
+  assert.deepEqual([...place.text.before], numbers(1, 1000), "the lines before the tail");
+  assert.deepEqual(place.text.parts, new Map());
   assert.equal(place.structured, WHOLE, "codemode's copy, under 1 MiB, is all of it");
   const notice = `\n\n[Showing lines 1001-3000 of 3000. Full output: ${log}]`;
   assert.ok(textOf(out).endsWith(notice));
@@ -81,7 +82,7 @@ test("a command that timed out: its result keeps only the text, whose notice say
   assert.deepEqual(out.details, {});
   const trailer = `\n\n[Showing lines 1001-3000 of 3000. Full output: ${log}]\n\nCommand timed out after 1 seconds`;
   assert.ok(textOf(out).endsWith(trailer));
-  assert.deepEqual(placeOf(out, fixtures).text.before, numbers(1, 1000));
+  assert.deepEqual([...placeOf(out, fixtures).text.before], numbers(1, 1000));
   assert.ok(textOf(patchResult(out, digits)).endsWith(trailer), "pi's lines stay");
 });
 
@@ -91,7 +92,7 @@ test("a tail of one long line is its end, and pi's notice says so", async (t) =>
     const out = await run("bash", { command, timeout: 1 }, fixtures);
     logOf(t, out);
     const place = placeOf(out, fixtures).text;
-    assert.deepEqual(place.before, ["1"], command);
+    assert.deepEqual([...place.before], ["1"], command);
     assert.equal(place.parts.get(0), line, "the whole of the line the tail is part of");
     const tail = textOf(out).split("\n")[0];
     assert.ok(tail.length < line.length && line.endsWith(tail));
@@ -115,21 +116,28 @@ test("codemode's copy of output over 1 MiB leaves out its middle, at a place kno
   // seq's lines differ, so each matches one place; é's cut is inside a character.
   for (const command of ["seq 1 200000", "yes 'héllo wörld' | head -n 100000"]) {
     const out = await run("bash", { command }, fixtures);
-    const log = linesOf(logOf(t, out), fixtures);
+    const log = [...linesOf(logOf(t, out), fixtures)];
     const copy = (out.structuredContent as { output: string; truncated: boolean }).output.split("\n");
-    const { before, parts, omission } = placeOf(out, fixtures).structured;
+    const { text, structured } = placeOf(out, fixtures);
+    // The model's tail starts after lines that run past the first MiB the log is read in.
+    const hidden = [...text.before];
+    assert.deepEqual(hidden, log.slice(0, hidden.length));
+    assert.equal(log[hidden.length], textOf(out).split("\n")[0]);
+    assert.ok(Buffer.byteLength(hidden.join("\n")) > 1024 * 1024);
+    const { before, parts, omission } = structured;
     assert.ok(omission, command);
     const { at } = omission;
     assert.deepEqual([copy[at - 1], isOmission(copy[at]), copy[at + 1]], ["", true, ""], "the marker's line");
     assert.equal(copy.filter(isOmission).length, 1);
-    assert.deepEqual(before, []);
+    assert.deepEqual([...before], []);
     // The head is the log's first lines, the last of them cut short.
     assert.deepEqual(copy.slice(0, at - 2), log.slice(0, at - 2));
     assert.equal(parts.get(at - 2), log[at - 2]);
     assert.ok(log[at - 2].startsWith(copy[at - 2]) && copy[at - 2] !== log[at - 2]);
     // The tail resumes partway through the line after `before`, and runs to the end.
-    const resume = omission.before.length;
-    assert.deepEqual(omission.before, log.slice(0, resume));
+    const resumed = [...omission.before];
+    const resume = resumed.length;
+    assert.deepEqual(resumed, log.slice(0, resume));
     assert.equal(parts.get(at + 2), log[resume]);
     assert.ok(log[resume].endsWith(copy[at + 2]) && copy[at + 2] !== log[resume]);
     assert.deepEqual(copy.slice(at + 3), log.slice(resume + 1));
@@ -145,8 +153,15 @@ test("a read from an offset, and pi's hints for reading on", async (t) => {
   const out = await run("read", { path: "f.txt", offset: 4, limit: 3 }, dir);
   const hint = "\n\n[4 more lines in file. Use offset=7 to continue.]";
   assert.equal(textOf(out), `4\n5\n6${hint}`);
-  const place = { before: ["1", "2", "3"], parts: new Map() };
-  assert.deepEqual(placeOf(out, dir), { text: place, structured: place });
+  const place = placeOf(out, dir);
+  assert.equal(place.structured, place.text, "read's copy is its text");
+  assert.deepEqual([...place.text.before], ["1", "2", "3"]);
+  assert.deepEqual([...place.text.before], ["1", "2", "3"], "the lines can be read again, for the copy");
+  assert.deepEqual(place.text.parts, new Map());
+  // pi slices its lines from offset - 1, which slice cuts to a whole number.
+  const half = await run("read", { path: "f.txt", offset: 4.5, limit: 3 }, dir);
+  assert.ok(textOf(half).startsWith("4\n5\n6\n\n"));
+  assert.deepEqual([...placeOf(half, dir).text.before], ["1", "2", "3"]);
   const patched = patchResult(out, digits);
   assert.equal(textOf(patched), `#\n#\n#${hint}`);
   assert.equal(patched?.structuredContent, `#\n#\n#${hint}`, "read's copy is its text, with pi's lines");
@@ -181,8 +196,22 @@ test("a read's path, as pi takes it: @ dropped, then ~ expanded, or a file URL",
   const out = await run("read", { path: "@~/f.txt", offset: 3 }, fixtures);
   assert.equal(textOf(out), "3\n4", "pi read it");
   assert.equal(toolPath(out.input), "~/f.txt");
-  assert.deepEqual(placeOf(out, fixtures).text.before, ["1", "2"]);
+  assert.deepEqual([...placeOf(out, fixtures).text.before], ["1", "2"]);
   const url = await run("read", { path: pathToFileURL(join(home, "f.txt")).href, offset: 3 }, fixtures);
   assert.equal(textOf(url), "3\n4", "pi read it");
-  assert.deepEqual(placeOf(url, fixtures).text.before, ["1", "2"]);
+  assert.deepEqual([...placeOf(url, fixtures).text.before], ["1", "2"]);
+});
+
+test("a file's lines, read a chunk at a time, are its lines", (t) => {
+  const dir = mkdtempSync(join(fixtures, "pi-output-lines-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const f = join(dir, "f.txt");
+  // Lines that run past each MiB, one longer than a MiB, and characters of
+  // more than one byte, with and without a last newline.
+  const long = `${"x".repeat(600_000)}\n${"é".repeat(700_000)}\n${"y".repeat(1_500_000)}\nz\n`;
+  for (const text of [long, long.slice(0, -1), "", "\n", "a\nb"]) {
+    writeFileSync(f, text);
+    assert.deepEqual([...linesOf(f, dir)], text.split("\n"), JSON.stringify(text.slice(-3)));
+  }
+  assert.deepEqual([...linesOf(join(dir, "missing.txt"), dir)], []);
 });

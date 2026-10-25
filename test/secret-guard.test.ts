@@ -712,6 +712,56 @@ test("a tail of one long line is judged by the whole line", async () => {
   }
 });
 
+test("a part of a line over 1 MiB, too long to judge, is the mark", async () => {
+  const g = load(ext);
+  await g.start(repo());
+  const log = join(root, "pi-bash-1014.log");
+  const notice = `[Showing last 48.8KB of line 2 (line is 1.0MB). Full output: ${log}]`;
+  const details = {
+    truncation: { truncated: true, totalLines: 2, outputLines: 1, lastLinePartial: true },
+    fullOutputPath: log,
+  };
+  const tail = (command: string, first: string, line: string) => {
+    writeFileSync(log, `${first}\n${line}`);
+    const text = `${line.slice(-50_000)}\n\n${notice}`;
+    return g.result("bash", { command }, text, undefined, details)?.content[0].text;
+  };
+  const x = "x".repeat(1024 * 1024 + 1);
+  // A plain line, a secret file's, and one that names a protected path.
+  assert.equal(tail("ls", "1", x), `${MARK}\n\n${notice}`);
+  assert.equal(tail("cat .env", "1", `NOTE=${x}`), `${MARK}\n\n${notice}`);
+  assert.equal(tail("ls", "1", `vault/a ${x}`), `${MARK}\n\n${notice}`);
+  // A line inside a private key is dropped, as ever.
+  assert.equal(tail("cat .env", "-----BEGIN PRIVATE KEY-----", x), `\n\n${notice}`);
+  // A line of 1 MiB is judged.
+  assert.equal(tail("ls", "1", x.slice(1)), undefined);
+});
+
+test("output the guard can't filter is withheld, since pi would pass it on unfiltered", async () => {
+  const g = load(ext);
+  await g.start(repo());
+  for (const [thrown, why] of [
+    [new Error("unreadable"), "Error"],
+    [Object.assign(new Error("too long"), { code: "ERR_STRING_TOO_LONG" }), "ERR_STRING_TOO_LONG"],
+    ["unreadable", "string"],
+  ]) {
+    const details = {
+      get fullOutputPath(): string {
+        throw thrown;
+      },
+    };
+    const out = g.result(
+      "bash",
+      { command: "cat .env" },
+      "API_KEY=sk-1",
+      { output: "API_KEY=sk-1" },
+      details,
+    );
+    const text = `[secret-guard: withheld this output, which it could not filter (${why})]`;
+    assert.deepEqual(out, { content: [{ type: "text", text }] }, why);
+  }
+});
+
 test("a line that only looks like codemode's omission marker leaves nothing out", async () => {
   const g = load(ext);
   await g.start(repo());

@@ -40,7 +40,7 @@
 import { readdirSync, realpathSync, statSync } from "node:fs";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext, ToolResultEvent } from "@earendil-works/pi-coding-agent";
 import { expandHome, realOrSame } from "../src/paths.ts";
 import {
   isBashLog,
@@ -365,7 +365,7 @@ function step(s: State, line: string, kind: (header: string) => Section): [Role,
 const RESTARTS = new Set<Role>(["header", "commit", "hunk", "end"]);
 
 /** The state after lines, from the start of an output. */
-function stateAfter(lines: string[], kind: (header: string) => Section): State {
+function stateAfter(lines: Iterable<string>, kind: (header: string) => Section): State {
   let s = START;
   for (const line of lines) s = step(s, line, kind)[1];
   return s;
@@ -380,6 +380,11 @@ function stateAfter(lines: string[], kind: (header: string) => Section): State {
  */
 export type Filter = { protect: boolean; redact: "matches" | "all" | "values" };
 
+// The longest whole line that a part of it is judged by, as long as codemode's
+// whole copy. A part of a longer one is the mark, which keeps what judging a
+// part costs bounded, however long its line.
+const LONGEST = 1024 * 1024;
+
 /**
  * Filters a copy of a tool's output in one pass, line by line, from the state
  * where the copy starts in the whole output, and where it resumes after
@@ -389,7 +394,8 @@ export type Filter = { protect: boolean; redact: "matches" | "all" | "values" };
  * opened unseen. In a secret file's diff section, a
  * hunk header loses the context git adds, which may be a line inside a key. A
  * line that is part of a longer one is judged by that line: dropped if it would
- * be, kept if it would be unchanged, and otherwise the mark.
+ * be, kept if it would be unchanged, and otherwise the mark, as it is when that
+ * line is too long to judge.
  */
 export function filterOutput(text: string, cfg: Config, how: Filter, place: Placement = WHOLE): string {
   const folders = how.protect ? cfg.folders : [];
@@ -416,11 +422,13 @@ export function filterOutput(text: string, cfg: Config, how: Filter, place: Plac
     const full = whole?.includes(line) ? whole : line;
     const [role, next] = step(state, full, kind);
     state = next;
+    const long = full !== line && full.length > LONGEST;
     let fate: string | undefined;
-    if (state.section === "protected" || names(full)) removed++;
-    else if (how.redact !== "all" && state.section !== "secret") fate = redactMatch(full, cfg);
+    if (state.section === "protected" || (!long && names(full))) removed++;
+    else if (how.redact !== "all" && state.section !== "secret") fate = long ? MARK : redactMatch(full, cfg);
     else if (role === "end") out.fill(undefined, from);
     else if (role === "hunk" && state.section === "secret") fate = HUNK.exec(full)?.[0];
+    else if (long && role !== "key") fate = MARK;
     else if (role !== "key") {
       const m = redactMatch(full, cfg);
       fate = redactLine(m.replace(role === "begin" ? PEM_REST : PEM_INLINE, MARK), cfg.redactKeys);
@@ -477,8 +485,11 @@ function writesMark(command: string, cfg: Config): boolean {
  * protected file's diff section. Only read, whose offset says where it starts,
  * can show part of one safely.
  */
-const guardedLog = (p: string, cwd: string, folders: string[]) =>
-  isBashLog(p) && linesOf(p, cwd).some((line) => opensSection(line, folders));
+function guardedLog(p: string, cwd: string, folders: string[]): boolean {
+  if (!isBashLog(p)) return false;
+  for (const line of linesOf(p, cwd)) if (opensSection(line, folders)) return true;
+  return false;
+}
 
 export default function (pi: ExtensionAPI) {
   let cfg: Config = DEFAULTS;
@@ -545,7 +556,7 @@ export default function (pi: ExtensionAPI) {
     return hit ? refuse(hit) : undefined;
   });
 
-  pi.on("tool_result", (event, ctx) => {
+  const filterResult = (event: ToolResultEvent, cwd: string) => {
     const path = toolPath(event.input);
     let how: Filter | undefined;
     if (event.toolName === "read" && path !== undefined) {
@@ -557,15 +568,26 @@ export default function (pi: ExtensionAPI) {
     } else if (event.toolName === "grep" || event.toolName === "find") {
       how = { protect: true, redact: "matches" };
     } else if (event.toolName === "bash") {
-      const prints = printsSecrets(String(event.input.command ?? ""), ctx.cwd, cfg);
+      const prints = printsSecrets(String(event.input.command ?? ""), cwd, cfg);
       how = { protect: true, redact: prints ?? "matches" };
     }
     if (!how) return undefined;
     const filter = how;
     // grep and find output is never cut off from a file pi keeps.
-    const place =
-      event.toolName === "read" || event.toolName === "bash" ? placeOf(event, ctx.cwd) : undefined;
+    const place = event.toolName === "read" || event.toolName === "bash" ? placeOf(event, cwd) : undefined;
     const placed = (at: Placement | undefined) => (t: string) => filterOutput(t, cfg, filter, at);
     return patchResult(event, placed(place?.text), placed(place?.structured));
+  };
+
+  pi.on("tool_result", (event, ctx) => {
+    try {
+      return filterResult(event, ctx.cwd);
+    } catch (err) {
+      // pi passes on the output unfiltered when a handler throws, so it is
+      // withheld instead, codemode's copy too, which pi drops with new text.
+      const why = err instanceof Error ? ((err as { code?: string }).code ?? err.name) : typeof err;
+      const text = `[secret-guard: withheld this output, which it could not filter (${why})]`;
+      return { content: [{ type: "text" as const, text }] };
+    }
   });
 }
