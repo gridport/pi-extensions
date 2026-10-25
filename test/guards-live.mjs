@@ -164,7 +164,10 @@ try {
   check(
     "a subagent ran and its rm -rf was refused",
     fs.existsSync(path.join(dir, "spared")) &&
-      subRm.tools.some((r) => r.tool === "subagent" && /command.?guard|nobody can be asked/i.test(r.text)),
+      subRm.tools.some(
+        (r) =>
+          r.tool === "subagent" && /command.?guard|nobody can be asked|deletes recursively/i.test(r.text),
+      ),
   );
   const leaked = [read, bash, env, sub, subRm, rm].flatMap((s) => s.leaked());
   check("no secret reached the model", leaked.length === 0, leaked.join(", "));
