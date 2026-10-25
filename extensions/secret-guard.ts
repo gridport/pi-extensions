@@ -369,16 +369,17 @@ const RESTARTS = new Set<Role>(["header", "commit", "hunk", "end"]);
 
 /**
  * The state after lines, from the start of an output, how many lines there
- * are, and the index of the last past which a block may have opened unseen.
+ * are, and, of those from index `from` on, the first past which a block may
+ * have opened unseen: its role, and the section it is in.
  */
-function stateAfter(lines: Iterable<string>, kind: (header: string) => Section) {
+function stateAfter(lines: Iterable<string>, kind: (header: string) => Section, from = 0) {
   let state = START;
   let count = 0;
-  let restart = -1;
+  let restart: { role: Role; section: Section } | undefined;
   for (const line of lines) {
     const [role, next] = step(state, line, kind);
+    if (!restart && count >= from && RESTARTS.has(role)) restart = { role, section: next.section };
     state = next;
-    if (RESTARTS.has(role)) restart = count;
     count++;
   }
   return { state, count, restart };
@@ -436,11 +437,15 @@ export function filterOutput(text: string, cfg: Config, how: Filter, place: Plac
       pis.add(out.length);
       out.push(line);
       if (i === omission.at) {
-        const resumed = stateAfter(omission.before, kind);
+        // The part left out starts at the line the head ends on, which may
+        // show only its start. An END with no BEGIN first there drops the head
+        // back, where an END drops back at all, and after a restart there an
+        // END drops back no further.
+        const resumed = stateAfter(omission.before, kind, start.count + omission.at - 2);
         state = resumed.state;
-        // A restart from the line the head ends on, which may show only its
-        // start, is in the part left out, and an END drops back no further.
-        if (resumed.restart >= start.count + omission.at - 2) from = out.length;
+        const r = resumed.restart;
+        if (r?.role === "end" && (how.redact === "all" || r.section === "secret")) dropBack();
+        if (r) from = out.length;
       }
       continue;
     }

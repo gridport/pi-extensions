@@ -394,6 +394,43 @@ test("an END with no BEGIN drops lines back only to where a block could have ope
   );
 });
 
+test("around codemode's marker, an END drops back as far as a full pass would", () => {
+  const marker = "[... 99 bytes omitted ...]";
+  const place = (at: number, before: string[], parts = new Map<number, string>()): Placement => ({
+    before: [],
+    parts,
+    omission: { at, before },
+  });
+  const header = "diff --git a/.env b/.env";
+  const end = "+-----END PRIVATE KEY-----";
+  // The part left out holds the END of a block the head's lines are in.
+  assert.equal(
+    drop(
+      [header, "@@ -1,9 +1,9 @@", "+MIIEhead1", "+MIIEhead2", "", marker, "", "+B=2"].join("\n"),
+      place(5, [header, "@@ -1,9 +1,9 @@", "+MIIEhead1", "+MIIEhead2", "+MIIEmid", end]),
+    ),
+    [header, "@@ -1,9 +1,9 @@", "", marker, "", "+B=2"].join("\n"),
+  );
+  // Not after a hunk there, where the block may have opened.
+  const kept = [header, "@@ -1,9 +1,9 @@", "+A=1", "+A=2", "", marker, "", "+B=2"].join("\n");
+  assert.equal(
+    drop(kept, place(5, [header, "@@ -1,9 +1,9 @@", "+A=1", "+A=2", "@@ -50,3 +50,3 @@", "+MIIEm", end])),
+    kept,
+  );
+  // Not where an END drops nothing back, as in output not from a secret file.
+  const plain = ["MIIEa", "MIIEb", "", marker, "", "B=2"].join("\n");
+  assert.equal(drop(plain, place(3, ["MIIEa", "MIIEb", "-----END PRIVATE KEY-----"])), plain);
+  // A key's line that the head ends partway through, after a hunk: an END in
+  // the tail drops it back, with no restart in the part left out.
+  assert.equal(
+    drop(
+      [header, "@@ -900,5 +900,5 @@", "+MIIEstr", "", marker, "", "+MIIEtail", end, "+B=2"].join("\n"),
+      place(4, [header, "@@ -900,5 +900,5 @@", "+MIIEstraddle", "+MIIEmid"], new Map([[2, "+MIIEstraddle"]])),
+    ),
+    [header, "@@ -900,5 +900,5 @@", "", marker, "", "+B=2"].join("\n"),
+  );
+});
+
 test("a copy's placement counts only where it fits the copy", () => {
   const none = new Map<number, string>();
   assert.equal(
