@@ -143,6 +143,8 @@ function exempt(t: string, cwd: string, changesDir: boolean, folders: string[]):
   // A variable, a substitution or a brace expansion could point anywhere.
   if (/[$`{]/.test(t)) return false;
   const path = expandHome(t);
+  // So could ~user, ~+ or ~-, which the shell expands and resolve() doesn't.
+  if (path.startsWith("~")) return false;
   // So could .., which resolve() takes as text, past any symlink before it.
   if (path.split("/").includes("..")) return false;
   const glob = path.search(/[*?[]/);
@@ -220,6 +222,8 @@ function findStarts(argv: string[]): string[] {
 
 /** What a deleting find deletes: its starts, and what each rm it runs names besides the match ({}). */
 function findTargets(argv: string[], runs: ReturnType<typeof programOf>[]): string[] {
+  // Following symlinks, find reaches past the folders its starts lie in.
+  if (argv.some((t) => t === "-follow" || /^-[HLPEXdsx]*L[HLPEXdsx]*$/.test(t))) return [];
   const named = runs
     .filter((r) => r.name === "rm")
     .flatMap((r) => operands(r.argv).filter((t) => t !== "{}"));
@@ -249,7 +253,7 @@ export function ruleMatches(rule: Rule, argv: string[]): boolean {
 export function check(line: string, cwd: string, cfg: Config): string[] {
   const reasons: string[] = [];
   const commands = commandsOf(line);
-  const changesDir = commands.some((c) => ["cd", "pushd", "popd"].includes(c.name));
+  const changesDir = commands.some((c) => c.chdir || ["cd", "pushd", "popd"].includes(c.name));
   for (const { argv, name, wrappers } of commands) {
     // find runs its -exec commands itself, sudo and all.
     const runs = name === "find" ? findRuns(argv) : [];
@@ -267,9 +271,8 @@ export function check(line: string, cwd: string, cfg: Config): string[] {
       name === "find" &&
       (argv.includes("-delete") || runs.some((r) => r.name === "rm"))
     ) {
-      reasons.push(
-        deleteReason("deletes the files find matches", findTargets(argv, runs), cwd, changesDir, cfg),
-      );
+      const moved = changesDir || runs.some((r) => r.chdir);
+      reasons.push(deleteReason("deletes the files find matches", findTargets(argv, runs), cwd, moved, cfg));
     }
     for (const rule of cfg.rules) {
       if (ruleMatches(rule, argv))

@@ -594,6 +594,42 @@ test("codemode's copy resumes inside a secret file's section that opens in the p
     copy.structuredContent.output,
     `${lines.slice(0, 2).join("\n")}${omitted}${MARK}\n+PASSWORD=${MARK}\n${lines.slice(5).join("\n")}`,
   );
+  // A command that prints a secret file, with no diff in it, cuts off a name the same way.
+  const env = join(root, "pi-bash-c0e1.log");
+  writeFileSync(env, "PORT=80\nAPI_KEY_0ab1c2d3=tok-1\nX=1");
+  const printed = g.result(
+    "bash",
+    { command: "cat .env" },
+    "x",
+    { output: `PORT=80${omitted}0ab1c2d3=tok-1\nX=1`, truncated: true },
+    { truncation: { truncated: true, totalLines: 3, outputLines: 2 }, fullOutputPath: env },
+  );
+  assert.equal(printed.structuredContent.output, `PORT=80${omitted}${MARK}\nX=1`);
+});
+
+test("a line that only looks like codemode's omission marker leaves nothing out", async () => {
+  const g = load(ext);
+  await g.start(repo());
+  const marker = "[... 9 bytes omitted ...]";
+  const bash = (command: string, out: string) =>
+    g.result("bash", { command }, out, { output: out, truncated: false });
+  const vault = bash(
+    "git diff",
+    `${marker}\ndiff --git a/vault/t.txt b/vault/t.txt\n+A1\ndiff --git a/b.md b/b.md\n+ok`,
+  );
+  const kept = `${marker}\ndiff --git a/b.md b/b.md\n+ok\n${REMOVED(2)}`;
+  assert.equal(vault.content[0].text, kept);
+  assert.equal(vault.structuredContent.output, kept);
+  const env = bash("git diff", `${marker}\ndiff --git a/.env b/.env\n+API_KEY=tok-1`);
+  assert.equal(env.structuredContent.output, `${marker}\ndiff --git a/.env b/.env\n+API_KEY=${MARK}`);
+  const cat = bash("cat .env", `${marker}\nNOTE=hello\nAPI_KEY=tok-1`);
+  assert.equal(
+    cat.structuredContent.output,
+    `${marker}\nNOTE=hello\nAPI_KEY=${MARK}`,
+    "a whole line follows",
+  );
+  const read = g.result("read", { path: join(repo(), ".env") }, `${marker}\nNOTE=hello`);
+  assert.equal(read, undefined);
 });
 
 test("a protected diff section cut off before its header is still dropped", async () => {
@@ -965,6 +1001,8 @@ test("tool output is filtered and redacted", async () => {
   for (const value of ["sk\r", "ab\rcd", "ab\u{2028}cd"])
     assert.equal(text("read", { path: ".env" }, `API_KEY=${value}\r\nX=1`), `API_KEY=${MARK}\r\nX=1`, value);
   assert.equal(text("bash", { command: "cat < .env" }, env), `API_KEY=${MARK}\nPORT=80`);
+  assert.equal(text("bash", { command: "git show HEAD:.env.production" }, env), `API_KEY=${MARK}\nPORT=80`);
+  assert.equal(text("bash", { command: "git show main:.envrc" }, env), `API_KEY=${MARK}\nPORT=80`);
   assert.equal(
     text("bash", { command: "grep -r -C1 TOKEN ." }, "./.env-2-SECRET_TOKEN=abc"),
     `./.env-2-SECRET_TOKEN=${MARK}`,

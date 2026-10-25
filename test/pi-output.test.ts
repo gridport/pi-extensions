@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { type TestContext, test } from "node:test";
+import { pathToFileURL } from "node:url";
 import { createBashToolDefinition, createReadToolDefinition } from "@earendil-works/pi-coding-agent";
 import {
   isBashLog,
@@ -137,7 +138,7 @@ test("a read from an offset, and pi's hints for reading on", async (t) => {
   assert.ok(textOf(patchResult(wide, digits)).endsWith(limit), "a hint at read's byte limit stays");
 });
 
-test("a read's path, as pi takes it: @ dropped, then ~ expanded", async (t) => {
+test("a read's path, as pi takes it: @ dropped, then ~ expanded, or a file URL", async (t) => {
   const home = mkdtempSync(join(fixtures, "pi-output-home-"));
   const saved = process.env.HOME;
   t.after(() => {
@@ -151,4 +152,7 @@ test("a read's path, as pi takes it: @ dropped, then ~ expanded", async (t) => {
   assert.equal(textOf(out), "3\n4", "pi read it");
   assert.equal(toolPath(out.input), "~/f.txt");
   assert.deepEqual(leftOut(out, fixtures).text.head, ["1", "2"]);
+  const url = await run("read", { path: pathToFileURL(join(home, "f.txt")).href, offset: 3 }, fixtures);
+  assert.equal(textOf(url), "3\n4", "pi read it");
+  assert.deepEqual(leftOut(url, fixtures).text.head, ["1", "2"]);
 });

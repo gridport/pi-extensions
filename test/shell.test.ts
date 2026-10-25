@@ -77,6 +77,12 @@ test("wrappers are stripped", () => {
   assert.deepEqual(run("sudo --user me rm x"), ["rm", "x"], "a long option, too");
   assert.deepEqual(run("xargs --max-args 1 rm x"), ["rm", "x"]);
   assert.deepEqual(run("timeout --signal KILL 5 rm x"), ["rm", "x"]);
+  assert.deepEqual(run("env -iC / rm x"), ["rm", "x"], "a cluster that ends in one");
+  assert.deepEqual(run("xargs -tn 1 rm x"), ["rm", "x"]);
+  assert.deepEqual(run("sudo -uroot rm x"), ["rm", "x"], "a value inside the cluster");
+  const chdir = (line: string) => commandsOf(line)[0].chdir;
+  assert.ok(chdir("env -iC /x rm y") && chdir("env --chdir=/x rm y") && chdir("sudo -D /x rm y"));
+  assert.ok(!chdir("env -i rm y") && !chdir("sudo -C 3 rm y") && !chdir("rm -C y"), "nor its own options");
 });
 
 test("a function's body is looked into", () => {

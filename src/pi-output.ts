@@ -4,6 +4,7 @@
 
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import type { ToolResultEvent, ToolResultEventResult } from "@earendil-works/pi-coding-agent";
 import { expandHome } from "./paths.ts";
 import { base } from "./shell.ts";
@@ -38,10 +39,14 @@ export const isOmission = (line: string) => OMISSION.test(line);
 export const toolPath = (input: Record<string, unknown>) =>
   typeof input.path === "string" ? input.path.replace(/^@/, "") : undefined;
 
-/** A file's lines, its path resolved as pi resolves a tool's: ~ expanded, then from cwd. None if it can't be read. */
+/**
+ * A file's lines, its path resolved as pi resolves a tool's: ~ expanded, or a
+ * file URL taken as its path, then from cwd. None if it can't be read.
+ */
 export function linesOf(path: string, cwd: string): string[] {
   try {
-    return readFileSync(resolve(cwd, expandHome(path)), "utf8").split("\n");
+    const p = path.startsWith("file://") ? fileURLToPath(path) : expandHome(path);
+    return readFileSync(resolve(cwd, p), "utf8").split("\n");
   } catch {
     return [];
   }

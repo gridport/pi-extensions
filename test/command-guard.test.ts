@@ -130,6 +130,13 @@ test("folders named in allowFolders need no OK, from the session's folder down",
   assert.deepEqual(ask("rm -rf node_modules src"), ["deletes recursively"], "every target");
   assert.deepEqual(ask("rm -rf node_modules/.."), ["deletes recursively"]);
   assert.deepEqual(ask("cd .. && rm -rf dist"), ["deletes recursively"], "a relative target after a cd");
+  assert.deepEqual(ask("env -C / rm -rf node_modules"), ["deletes recursively"], "or in another folder");
+  assert.deepEqual(ask("env -iC / rm -rf node_modules"), ["deletes recursively"]);
+  assert.deepEqual(ask("sudo --chdir=/ rm -rf node_modules", proj), ["runs as root", "deletes recursively"]);
+  assert.deepEqual(ask("find dist -exec env -C / rm -rf node_modules {} +"), [
+    "deletes the files find matches",
+  ]);
+  assert.deepEqual(ask("rm -rf ~other/dist ~+/dist"), ["deletes recursively"], "a home the shell expands");
   assert.deepEqual(
     ask("rm -rf src", join(proj, "dist")),
     ["deletes recursively"],
@@ -154,6 +161,9 @@ test("folders named in allowFolders need no OK, from the session's folder down",
     "deletes the files find matches",
   ]);
   assert.deepEqual(ask("find node_modules -name x -exec rm -rf {} +"), []);
+  // Following symlinks, find goes wherever they lead.
+  assert.deepEqual(ask("find -L dist -delete"), ["deletes the files find matches"]);
+  assert.deepEqual(ask("find dist -follow -exec rm -rf {} +"), ["deletes the files find matches"]);
   // A symlink is judged by where it leads.
   const dir = mkdtempSync(join(tmpdir(), "command-guard-"));
   try {

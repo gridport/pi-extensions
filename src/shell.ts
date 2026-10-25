@@ -11,6 +11,8 @@ export interface Cmd {
   name: string;
   /** The wrappers stripped, such as sudo or xargs. */
   wrappers: string[];
+  /** Whether a wrapper runs the program in another folder, as env -C does. */
+  chdir: boolean;
   redirects: string[];
   heredocs: string[];
   /** Code for an interpreter this splitter can't read, such as python -c's or what is piped into node. */
@@ -229,16 +231,32 @@ const VALUE_OPTIONS: Record<string, RegExp> = {
   timeout: TIMEOUT_OPTIONS,
   gtimeout: TIMEOUT_OPTIONS,
 };
+// Wrapper options that run the program in another folder, clustered or not.
+const CHDIR_OPTIONS: Record<string, RegExp> = {
+  env: /^(?:-[A-Za-z]*C|--chdir)/,
+  sudo: /^(?:-[A-Za-z]*D|--chdir)/,
+};
+
+/**
+ * Whether a wrapper's cluster of short options, such as env -iC or xargs -tn,
+ * takes the next word as a value: its first option that takes one comes last.
+ * One earlier, as in sudo -uroot, takes the rest of the cluster.
+ */
+function clusterTakesNext(w: string, opt: string): boolean {
+  if (!/^-[A-Za-z0-9]{2,}$/.test(opt)) return false;
+  return [...opt.slice(1)].findIndex((c) => VALUE_OPTIONS[w]?.test(`-${c}`)) === opt.length - 2;
+}
 
 /** Strips leading assignments, keywords, a function's header and wrappers such as sudo or xargs. */
-function unwrap(argv: string[]): { argv: string[]; wrappers: string[] } {
+function unwrap(argv: string[]): { argv: string[]; wrappers: string[]; chdir: boolean } {
   const a = argv.slice();
   const wrappers: string[] = [];
+  let chdir = false;
   for (;;) {
     // function f { … } is stripped to its body, which runs when f is called.
     while (a.length && (ASSIGNMENT.test(a[0]) || KEYWORDS.has(a[0]) || a[0] === "function"))
       a.splice(0, a[0] === "function" ? 2 : 1);
-    if (!a.length || !WRAPPERS.has(base(a[0]))) return { argv: a, wrappers };
+    if (!a.length || !WRAPPERS.has(base(a[0]))) return { argv: a, wrappers, chdir };
     const w = base(a.shift() as string);
     wrappers.push(w);
     while (
@@ -246,15 +264,21 @@ function unwrap(argv: string[]): { argv: string[]; wrappers: string[] } {
       (a[0].startsWith("-") || ASSIGNMENT.test(a[0]) || (w.endsWith("timeout") && /^\d/.test(a[0])))
     ) {
       const opt = a.shift() as string;
-      if (VALUE_OPTIONS[w]?.test(opt)) a.shift();
+      if (CHDIR_OPTIONS[w]?.test(opt)) chdir = true;
+      if (VALUE_OPTIONS[w]?.test(opt) || clusterTakesNext(w, opt)) a.shift();
     }
   }
 }
 
 /** The program a simple command's words run, with what unwrap strips taken off. */
-export function programOf(words: string[]): { argv: string[]; name: string; wrappers: string[] } {
-  const { argv, wrappers } = unwrap(words);
-  return { argv, name: argv.length ? base(argv[0]) : "", wrappers };
+export function programOf(words: string[]): {
+  argv: string[];
+  name: string;
+  wrappers: string[];
+  chdir: boolean;
+} {
+  const { argv, wrappers, chdir } = unwrap(words);
+  return { argv, name: argv.length ? base(argv[0]) : "", wrappers, chdir };
 }
 
 const SHELLS = new Set(["sh", "bash", "zsh", "dash", "ksh", "fish"]);
@@ -297,13 +321,14 @@ function codeOf(argv: string[], raw: Raw): string[] {
 export function commandsOf(line: string, depth = 0): Cmd[] {
   const out: Cmd[] = [];
   for (const raw of splitShell(line)) {
-    const { argv, name, wrappers } = programOf(raw.words);
+    const { argv, name, wrappers, chdir } = programOf(raw.words);
     const code = codeOf(argv, raw);
     out.push({
       words: raw.words,
       argv,
       name,
       wrappers,
+      chdir,
       redirects: raw.redirects,
       heredocs: raw.heredocs,
       code,

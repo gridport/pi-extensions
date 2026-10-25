@@ -290,19 +290,21 @@ const HUNK = /^@@+ [^@]*@@+/;
 /**
  * Redacts a secret file's lines, dropping each private-key block but its BEGIN
  * line, kept as a mark. A block may be open where the lines start: `inKey`
- * says one is. Past a hunk header or codemode's omission marker, the lines may
- * start inside a block whose BEGIN they don't show, so an END with no BEGIN
- * drops the lines back to there. The line after the marker is part of a line,
- * whose name may be cut off, so it becomes the mark.
+ * says one is. Past a hunk header or, when `omitted` says the lines are
+ * codemode's copy of a long output, its omission marker, the lines may start
+ * inside a block whose BEGIN they don't show, so an END with no BEGIN drops the
+ * lines back to there. The line after the marker is part of a line, whose name
+ * may be cut off, so it becomes the mark.
  */
-function redactKeys(lines: string[], keys: string[], inKey = false): string[] {
+function redactKeys(lines: string[], keys: string[], inKey = false, omitted = false): string[] {
   const out: (string | undefined)[] = [];
   let from = 0;
   let partial = false;
   for (const line of lines) {
-    if (HUNK.test(line) || isOmission(line)) {
+    const omission = omitted && isOmission(line);
+    if (HUNK.test(line) || omission) {
       out.push(redactLine(line, keys));
-      [inKey, from, partial] = [false, out.length, isOmission(line)];
+      [inKey, from, partial] = [false, out.length, omission];
     } else if (inKey) {
       out.push(undefined);
       inKey = !PEM_END.test(line);
@@ -329,10 +331,11 @@ function endsInKey(lines: string[]): boolean {
 
 /**
  * Redacts a secret file's text, line by line, dropping the body of any
- * private-key block. `inKey` says the text starts inside one.
+ * private-key block. `inKey` says the text starts inside one, and `omitted`
+ * that it is codemode's copy of a long output, which may leave out a middle.
  */
-export function redactText(text: string, keys: string[], inKey = false): string {
-  return redactKeys(text.split("\n"), keys, inKey).join("\n");
+export function redactText(text: string, keys: string[], inKey = false, omitted = false): string {
+  return redactKeys(text.split("\n"), keys, inKey, omitted).join("\n");
 }
 
 /**
@@ -402,7 +405,9 @@ function endsInSection(lines: string[], opens: Opens): boolean {
 /**
  * Where text pi cut off resumes: inSection when it starts inside a protected
  * diff section, inSecret inside a secret file's, inKey inside a private-key
- * block, and afterOmission the sections after an omission marker.
+ * block, and afterOmission the sections after an omission marker. Without
+ * afterOmission, the text is no copy that leaves out a middle, and a line that
+ * looks like the marker is output like any other.
  */
 type Cut = {
   inSection?: boolean;
@@ -425,9 +430,9 @@ export function dropProtected(text: string, folders: string[], cut: Cut = {}): s
   let inSection = cut.inSection ?? false;
   let partial = false;
   for (const line of lines) {
-    if (isOmission(line)) {
+    if (cut.afterOmission && isOmission(line)) {
       kept.push(line);
-      inSection = cut.afterOmission?.inSection ?? inSection;
+      inSection = cut.afterOmission.inSection;
       partial = true;
       continue;
     }
@@ -457,14 +462,14 @@ function redactDiffs(text: string, cfg: Config, cut: Cut = {}): string {
   let section: string[] = [];
   const flush = () => {
     // One push per line: spreading a long section into push overflows the stack.
-    for (const line of redactKeys(section, cfg.redactKeys, inKey)) out.push(line);
+    for (const line of redactKeys(section, cfg.redactKeys, inKey, !!cut.afterOmission)) out.push(line);
     [section, inKey] = [[], false];
   };
   let partial = false;
   for (const line of text.split("\n")) {
     let next = inSecret;
-    if (isOmission(line)) {
-      next = cut.afterOmission?.inSecret ?? inSecret;
+    if (cut.afterOmission && isOmission(line)) {
+      next = cut.afterOmission.inSecret;
       partial = true;
     } else if (partial && line) partial = false;
     else next = nextSection(line, inSecret, opens);
@@ -496,7 +501,9 @@ function printsSecrets(command: string, cwd: string, cfg: Config): "values" | "a
         ? !args.length
         : (["export", "declare", "typeset"].includes(name) && args.every((a) => a.startsWith("-"))) ||
           (["declare", "typeset"].includes(name) && args.some((a) => /^-[A-Za-z]*p/.test(a)));
-    if (lists || declares || [...words, ...redirects].some((t) => namesSecretFile(t, cwd, cfg))) {
+    // git show rev:path and --opt=path name the file after the : or =.
+    const named = (t: string) => [t, ...t.split(/[:=]/).slice(1)].some((p) => namesSecretFile(p, cwd, cfg));
+    if (lists || declares || [...words, ...redirects].some(named)) {
       found = "assignments";
     }
   }
@@ -631,7 +638,7 @@ export default function (pi: ExtensionAPI) {
       const cut = { text: cutOf(left.text, cfg), structured: cutOf(left.structured, cfg) };
       const redact = (kept: string, from: Cut) => {
         if (prints === "values") return kept.replace(/^.*\S.*$/gm, MARK);
-        return prints ? redactText(kept, cfg.redactKeys, keyOpen(from)) : kept;
+        return prints ? redactText(kept, cfg.redactKeys, keyOpen(from), !!from.afterOmission) : kept;
       };
       text = (t) => redact(output(cut.text)(t), cut.text);
       structured = (t) => redact(output(cut.structured)(t), cut.structured);
