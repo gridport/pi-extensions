@@ -7,7 +7,7 @@ One npm package, `@gridport/pi-extensions`, holding three pi extensions in `exte
 - After any change: `pnpm check`, `pnpm test` and `pnpm test:mutants`, all green.
 - When a change touches how an extension talks to pi (events, tools, commands, settings, loading, subagents), and before every release: `pnpm test:live`. It runs locally only, costs a few cents and takes about 10 minutes. CI can't run it.
 - New behaviour gets a test and a mutant in `test/mutants.sh` that the test kills. A `BROKEN` mutant means its target text moved: update the entry to the new text.
-- The live scripts patch exact lines: `RESTORE` in `test/loop-live-reload.mjs`, and the registration call in `test/guards-live.mjs`. They throw if the line is gone; keep them matching the code.
+- The live scripts patch exact lines: `RESTORE` in `test/loop-live-reload.mjs`, and the `joinSubagents` import of `secret-guard.ts` in `test/guards-live.mjs`. They throw if the line is gone; keep them matching the code.
 
 ## Traps
 

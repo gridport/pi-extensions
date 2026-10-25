@@ -55,20 +55,19 @@ Settings go under `secretGuard` in `settings.json`:
 | `redactFiles` | `[".env", ".env.*", "*.env", ".envrc"]`                                                                        | File-name globs whose secret values are redacted                                                                             |
 | `redactKeys`  | `PASSWORD`, `PASSWD`, `PASSPHRASE`, `SECRET`, `TOKEN`, `KEY`, `APIKEY`, `CREDENTIAL`, `CREDENTIALS`, `PRIVATE` | Name parts that mark a value as secret. A part of 5 or more letters also matches inside a longer name, such as `DBPASSWORD`. |
 
-**Protected folders** are matched by name, case-insensitively, with symlinks resolved.
+**Protected folders** are matched by name, in any case, with symlinks resolved. A path into one, such as `vault/x`, counts wherever it appears, since it may be relative to a repository's root or another folder. The folder itself, such as `vault` or `x/vault`, counts only where a folder by that name exists, so a command such as `vault status` is fine in a project with no `vault` folder.
 - The agent can't use `read`, `ls`, `edit`, `write`, `grep` or `find` on a path inside one.
-- A bash command that names such a path is refused.
+- A bash command that names such a path is refused. That includes `git show HEAD:vault/x` and the code an interpreter runs, whether given to `python -c`, `node -e` or `deno eval`, or piped in from `echo` or a here-document.
 - So is any other tool argument that is one, such as an MCP tool opening `file:///…/vault/x`.
-- Lines that name a protected path are removed from `grep`, `find` and bash output.
+- Lines that name a protected path are removed from `grep`, `find` and bash output. So are the whole `git diff` and `git log -p` sections of files inside one.
+- pi saves a long bash output to a file and shows only its tail. When that file holds such a section, a bash command or `grep` that names it is refused, even in an interpreter's code, so the agent reads it with `read`, which leaves the section out wherever the read starts. pi's own lines after an output, such as where to find the rest, are always kept.
 
-**Secret files:** in what `read`, `grep` and bash return, and in the output of `env` and `printenv`, these become `[REDACTED]`:
+**Secret files:** these become `[REDACTED]` in what `read`, `grep` and bash return, `grep`, `rg`, `cat -n` and `diff` lines included, in a secret file's `git diff` and `git log -p` sections in bash output and pi's file of it, even when the command doesn't name the file, and in the output of `env`, `printenv`, `export` and `declare`:
 - the values of secret-looking names;
 - passwords inside URLs;
-- private-key blocks.
+- private-key blocks, PGP ones included.
 
-Writing `[REDACTED]` into a secret file is refused, so a redacted copy can't replace the real one.
-
-**Subagents:** if [pi-subagents](https://www.npmjs.com/package/pi-subagents) is installed, its subagents load this guard too.
+`printenv NAME` prints a bare value, so when the name looks secret, its whole output is redacted. pi saves a long bash output to a file and tells the agent to read it. Whatever the command, what `read`, `grep` or a bash command that names that file returns is redacted the same way. Writing `[REDACTED]` into a secret file is refused, so a redacted copy can't replace the real one.
 
 ## command-guard
 
@@ -79,9 +78,13 @@ Settings go under `commandGuard` in `settings.json`:
 | `builtins`       | `["rm", "sudo", "find"]` | Which built-in checks run: `rm` catches a recursive rm, `sudo` anything run through sudo or doas, and `find` a find with `-delete`, or with `-exec`, `-execdir` or `-ok` running rm                                                                                                                                               |
 | `rules`          | `[]`                     | More commands to confirm, such as `{ "command": "git reset", "args": ["--hard"], "reason": "discards uncommitted work" }`. A rule matches a command that starts with those words, in order. If `args` is given, the command must also include one of them. A short flag such as `-f` also matches inside a cluster such as `-fd`. |
 | `timeoutSeconds` | `120`                    | How long the question waits. No answer counts as no.                                                                                                                                                                                                                                                                              |
-- **Splitting:** commands are split as the shell would split them. That covers pipelines, `&&` chains, `bash -c '…'`, `eval`, `xargs`, `env` and `sudo`. Text inside a quoted argument or a here-document, such as a commit message, isn't mistaken for a command.
+- **Splitting:** commands are split as the shell would split them. That covers pipelines, `&&` chains, `bash -c '…'`, `eval`, `xargs`, `env` and `sudo`, and what `echo` or a here-document pipes into a shell. Text inside a quoted argument or a here-document, such as a commit message, isn't mistaken for a command.
 - **Temp directories:** a recursive rm or find whose targets all lie inside a temp directory runs without asking.
-- **No UI:** where nobody can be asked, such as print mode or background subagents, the command is refused.
+- **No UI:** where nobody can be asked, such as print mode or a subagent, the command is refused.
+
+## Subagents
+
+With [pi-subagents](https://www.npmjs.com/package/pi-subagents) installed in pi's own npm directory (`pi install npm:pi-subagents`), its subagents load both guards. A subagent can't ask you, so command-guard refuses there whatever it would ask about. A project-local or git install of pi-subagents isn't found, and its subagents run without the guards.
 
 ## Settings scope
 
@@ -89,7 +92,21 @@ For both guards, the global `~/.pi/agent/settings.json` decides. A project's `.p
 
 ## Limits
 
-The guards catch accidents. They don't sandbox a determined agent: a glob that never names a protected folder can still print the files inside it, and a script can do anything its interpreter allows. For real isolation, run the agent where the secrets aren't.
+The guards catch accidents. They don't sandbox a determined agent. Some things they let through:
+- a glob that never names a protected folder, such as `cat */secret.txt`;
+- a script that opens a protected file by a path it builds itself;
+- a word whose brace expansion yields more than 64 paths: only the first 64 are checked;
+- the folder itself named in a way they don't follow, such as after `cd -` or a second `cd`, or through a variable such as `$HOME/vault`. Paths into it are still removed from output, but output that prints none, such as `grep -rh`, gets through;
+- a protected or secret file's `git diff` section whose header never reaches them: output piped through `grep` or `tail`, `git log --graph`, `--color=always` or `--word-diff`, `diff -r` of two folders, or pi's file of a long output named through a glob or a variable;
+- code an interpreter reads from a file, or that something other than `echo`, `printf` or a here-document pipes in;
+- a bare value, as `printenv NAME` prints it, in pi's file of a long output, and any value in that file when a command names it through a glob;
+- a secret file's diff saved to a file, such as `git diff > changes.diff`, then opened with `read` or `grep`;
+- a secret printed some other way, such as `echo $API_KEY`, or in a format they don't parse, such as `rg --json` or `rg --heading`;
+- the lines after the first of a multi-line quoted value, and a `read` that starts in the middle of a private-key block;
+- pi's optional `powershell` tool, which neither guard checks;
+- for command-guard, deletions it doesn't model, such as `find -exec sh -c 'rm -rf …'` or `fd -X rm -rf`.
+
+For real isolation, run the agent where the secrets aren't.
 
 ## Development
 
