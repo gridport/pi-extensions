@@ -221,6 +221,8 @@ test("settings: a project can add folders and keys but not remove them", () => {
   assert.deepEqual(merged.folders, ["vault"]);
   assert.ok(merged.redactKeys.includes("PIN") && merged.redactKeys.includes("PASSWORD"));
   assert.deepEqual(loadConfig({ folders: "x" }, { folders: [1] }).folders, ["vault"], "bad values fall back");
+  // pi's merged view holds the global entries too.
+  assert.deepEqual(loadConfig({ folders: ["vault", "x"] }, { folders: ["vault"] }).folders, ["vault", "x"]);
 });
 
 test("secret names and files", () => {

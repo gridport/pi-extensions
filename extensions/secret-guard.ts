@@ -51,7 +51,7 @@ import {
   patchResult,
   toolPath,
 } from "../src/pi-output.ts";
-import { readGlobal } from "../src/settings.ts";
+import { layered, readGlobal } from "../src/settings.ts";
 import { base, commandsOf, pathsOf } from "../src/shell.ts";
 import { joinSubagents } from "../src/subagents.ts";
 
@@ -86,17 +86,15 @@ const PROSE_TOOLS = new Set(["subagent", "subagent_supervisor", "intercom", "con
 
 const escapeRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
-function strings(v: unknown): string[] | undefined {
-  return Array.isArray(v) && v.every((s) => typeof s === "string") ? (v as string[]) : undefined;
-}
+const strings = (v: unknown): v is string[] => Array.isArray(v) && v.every((s) => typeof s === "string");
 
-/** The global settings decide each list; a project's settings can only add to it. */
+/**
+ * The global settings decide each list; a project's settings can only add to
+ * it. A global list that isn't all strings counts as the default, not as empty.
+ */
 export function loadConfig(merged: unknown, global: unknown): Config {
-  const m = (merged ?? {}) as Record<string, unknown>;
-  const g = (global ?? {}) as Record<string, unknown>;
-  const pick = (k: keyof Config) => [
-    ...new Set([...(strings(g[k]) ?? DEFAULTS[k]), ...(strings(m[k]) ?? [])]),
-  ];
+  const settings = layered(merged, global);
+  const pick = (k: keyof Config) => settings.projectAdds(k, DEFAULTS[k], strings);
   return { folders: pick("folders"), redactFiles: pick("redactFiles"), redactKeys: pick("redactKeys") };
 }
 

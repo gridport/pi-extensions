@@ -35,7 +35,7 @@ import { isAbsolute, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { expandHome, realOrSame } from "../src/paths.ts";
-import { readGlobal } from "../src/settings.ts";
+import { layered, readGlobal } from "../src/settings.ts";
 import { base, commandsOf, programOf } from "../src/shell.ts";
 import { joinSubagents } from "../src/subagents.ts";
 
@@ -77,19 +77,17 @@ function validRule(r: unknown): r is Rule {
  * asking, come from the global settings alone.
  */
 export function loadConfig(merged: unknown, global: unknown): { config: Config; problems: string[] } {
-  const m = (merged ?? {}) as Record<string, unknown>;
-  const g = (global ?? {}) as Record<string, unknown>;
+  const settings = layered(merged, global);
   const problems: string[] = [];
-  const list = (v: unknown) => (Array.isArray(v) ? v : []);
-  const gBuiltins = Array.isArray(g.builtins) ? g.builtins : DEFAULTS.builtins;
-  const builtins = [...new Set([...gBuiltins, ...list(m.builtins)])].filter((b) => {
-    if (BUILTINS.has(b)) return true;
+  const isList = (v: unknown): v is unknown[] => Array.isArray(v);
+  const builtins = settings.projectAdds<unknown>("builtins", DEFAULTS.builtins, isList).filter((b) => {
+    if (typeof b === "string" && BUILTINS.has(b)) return true;
     problems.push(`unknown builtin ${JSON.stringify(b)}`);
     return false;
-  });
+  }) as string[];
   const seen = new Set<string>();
   const rules: Rule[] = [];
-  for (const r of [...list(g.rules), ...list(m.rules)]) {
+  for (const r of settings.projectAdds("rules", [], isList)) {
     if (!validRule(r)) {
       problems.push(`invalid rule ${JSON.stringify(r)}`);
       continue;
@@ -99,12 +97,13 @@ export function loadConfig(merged: unknown, global: unknown): { config: Config; 
     seen.add(key);
   }
   // Folder names only, so no entry can be a path such as / or ~.
-  const allowFolders = [...new Set(list(g.allowFolders))].filter((f) => {
+  const folders = settings.globalOnly("allowFolders");
+  const allowFolders = [...new Set(isList(folders) ? folders : [])].filter((f) => {
     if (typeof f === "string" && f !== "" && f !== "." && f !== ".." && !f.includes("/")) return true;
     problems.push(`invalid allowFolders entry ${JSON.stringify(f)}`);
     return false;
-  });
-  const t = g.timeoutSeconds;
+  }) as string[];
+  const t = settings.globalOnly("timeoutSeconds");
   const timeoutSeconds = typeof t === "number" && t > 0 ? t : DEFAULTS.timeoutSeconds;
   if (t !== undefined && timeoutSeconds !== t) problems.push(`invalid timeoutSeconds ${JSON.stringify(t)}`);
   return { config: { builtins, rules, allowFolders, timeoutSeconds }, problems };

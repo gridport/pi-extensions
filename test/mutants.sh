@@ -96,6 +96,11 @@ mutant $f "a missing path is not resolved through its parent" 'return parent ===
 
 f=src/settings.ts
 mutant $f "~ in PI_CODING_AGENT_DIR is not expanded" '= () => expandHome(process.env.PI_CODING_AGENT_DIR' '= () => (process.env.PI_CODING_AGENT_DIR'
+mutant $f "a project's list replaces the global one" '[...(isList(g[key]) ? g[key] : fallback), ...(isList(m[key]) ? m[key] : [])]' '[...(isList(m[key]) ? m[key] : isList(g[key]) ? g[key] : fallback)]'
+mutant $f "a project can't add" ', ...(isList(m[key]) ? m[key] : [])' ''
+mutant $f "a bad global list counts as empty" 'isList(g[key]) ? g[key] : fallback' 'isList(g[key]) ? g[key] : []'
+mutant $f "an entry can show twice" '...new Set([...(isList(g[key])' '...([...(isList(g[key])'
+mutant $f "a project sets what only the global settings may" 'globalOnly: (key: string): unknown => g[key]' 'globalOnly: (key: string): unknown => m[key] ?? g[key]'
 
 f=src/subagents.ts
 mutant $f "nothing is registered" 'session.registration = registerRequiredChildExtensions({ sessionId, extensions });' ''
@@ -139,7 +144,7 @@ mutant $f "allowed folders are ignored" 'return inNamed(abs, resolve(cwd), folde
 mutant $f "a symlink out of an allowed folder counts" ' && inNamed(real, realOrSame(resolve(cwd)), folders)' ''
 mutant $f "a folder whose name starts the session's counts" 'p.startsWith(`${root}/`) &&' ''
 mutant $f "the session's own folders count" '.slice(root.length + 1)' ''
-mutant $f "a project allows folders" '...new Set(list(g.allowFolders))' '...new Set(list(m.allowFolders))'
+mutant $f "a project allows folders" 'settings.globalOnly("allowFolders")' 'settings.projectAdds("allowFolders", [], isList)'
 mutant $f "a path counts as a folder name" ' && !f.includes("/")' ''
 mutant $f "a .. entry counts as a folder name" ' && f !== ".."' ''
 mutant $f "a variable target gets no warning" 'const variable = left.find((t) => /[$`]/.test(t));' 'const variable = undefined;'
@@ -147,8 +152,8 @@ mutant $f "a glob target gets no warning" 'const glob = left.find((t) => /[*?[]/
 mutant $f "a warning may name an exempt target" 'const left = targets.filter((t) => !exempt(t, cwd, changesDir, cfg.allowFolders));' 'const left = targets.filter((t) => !exempt(t, cwd, changesDir, []));'
 mutant $f "a short flag does not match inside a cluster" ' && tok.includes(spec[1])' ' && tok === spec'
 mutant $f "a rule ignores its args" 'return !rule.args ||' 'return true ||'
-mutant $f "a project sets the timeout" 'const t = g.timeoutSeconds;' 'const t = m.timeoutSeconds ?? g.timeoutSeconds;'
-mutant $f "a project removes builtins" '...gBuiltins, ...list(m.builtins)' '...(Array.isArray(m.builtins) ? m.builtins : gBuiltins)'
+mutant $f "a project sets the timeout" 'const t = settings.globalOnly("timeoutSeconds");' 'const t = (merged as Record<string, unknown>)?.timeoutSeconds ?? settings.globalOnly("timeoutSeconds");'
+mutant $f "builtins are global only" 'settings.projectAdds<unknown>("builtins", DEFAULTS.builtins, isList)' '[settings.globalOnly("builtins") ?? DEFAULTS.builtins].flat()'
 mutant $f "asks with no UI" 'if (!ctx.hasUI) {' 'if (false) {'
 mutant $f "a 5-minute timeout" '{ timeout: ms, signal' '{ timeout: 300_000, signal'
 mutant $f "subagents don't load it" 'subagents = await joinSubagents(ctx.sessionManager.getSessionId(), "command-guard", path);' ''
@@ -261,7 +266,7 @@ mutant $f "a command's words are expanded without its naming pi's log" 'command.
 mutant $f "a --oneline commit doesn't end a section" '(?:commit )?[0-9a-f]' 'commit [0-9a-f]'
 mutant $f "subagents don't load it" 'subagents = await joinSubagents(ctx.sessionManager.getSessionId(), "secret-guard", path);' ''
 mutant $f "it stays registered after shutdown" 'pi.on("session_shutdown", () => { subagents?.leave();' 'pi.on("session_shutdown", () => {'
-mutant $f "a project replaces the lists" '...(strings(m[k]) ?? [])' ''
+mutant $f "a list of non-strings counts" 'v.every((s) => typeof s === "string")' 'true'
 
 f=src/pi-output.ts
 mutant $f "any .log is pi's" 'const BASH_LOG = /^pi-bash-[0-9a-f]+\.log$/;' 'const BASH_LOG = /\.log$/;'

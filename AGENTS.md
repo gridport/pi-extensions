@@ -13,7 +13,7 @@ One npm package, `@gridport/pi-extensions`, holding three pi extensions in `exte
 
 - pi maps `@earendil-works/*` and `typebox` to its own copies. They are `"*"` peers, plus pinned dev dependencies for `tsc` and the tests. Keep them out of `dependencies`: pi warns, and a bundled copy can split classes and registries.
 - pi loads the `.ts` files directly, and the tests run them through Node's type stripping. So use only erasable syntax (the tsconfig enforces it), and give relative imports their `.ts` extension.
-- The guards' settings: the global `settings.json` decides, and a project can only add. Project settings come from whatever repository the agent is working in, so they must never weaken a guard. Keep this when adding settings.
+- The guards' settings: the global `settings.json` decides, and a project can only add. Project settings come from whatever repository the agent is working in, so they must never weaken a guard. Read every setting through `layered()` in `src/settings.ts`: `projectAdds` for a list a project may extend, `globalOnly` for anything that loosens a guard.
 - Pin exact versions. pnpm here refuses versions published less than a day ago (`minimumReleaseAge`), so pick the newest version it accepts.
 
 ## Releases

@@ -19,3 +19,25 @@ export function readGlobal(key: string): unknown {
     return undefined;
   }
 }
+
+const record = (v: unknown) => (v && typeof v === "object" ? v : {}) as Record<string, unknown>;
+
+/**
+ * A guard's settings, read so that a project's can't weaken it: the global
+ * settings decide, and a project's can only add to a list. `merged` is pi's
+ * merged view of the guard's settings, `global` the global file's.
+ */
+export function layered(merged: unknown, global: unknown) {
+  const [m, g] = [record(merged), record(global)];
+  return {
+    /**
+     * A list a project can add to: the global list, or `fallback` when the
+     * global value isn't a list by `isList`, then a project's entries.
+     */
+    projectAdds: <T>(key: string, fallback: T[], isList: (v: unknown) => v is T[]): T[] => [
+      ...new Set([...(isList(g[key]) ? g[key] : fallback), ...(isList(m[key]) ? m[key] : [])]),
+    ],
+    /** A value only the global settings set. */
+    globalOnly: (key: string): unknown => g[key],
+  };
+}
