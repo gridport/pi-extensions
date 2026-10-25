@@ -311,8 +311,10 @@ function redactMatch(line: string, cfg: Config, depth = 0): string {
 }
 
 const DIFF_HEADER = /^diff --(?:git|cc|combined) (.*)$/;
-// A commit line, full or --oneline: no line of a diff starts with hex.
-const COMMIT_LINE = /^(?:commit )?[0-9a-f]{7,40}\b/;
+// A commit line, full or --oneline, whose hash is followed by a space: no
+// line of a diff starts so, nor can a key's base64 line, though --word-diff
+// shows a line with no + or - in front.
+const COMMIT_LINE = /^(?:commit [0-9a-f]{7,40}\b|[0-9a-f]{7,40} )/;
 // A diff's hunk header, without the context git adds after it.
 const HUNK = /^@@+ [^@]*@@+/;
 // What splits an output line into the words that may be paths.
@@ -337,7 +339,7 @@ type State = { section: Section; inKey: boolean };
 const START: State = { section: "none", inKey: false };
 
 /**
- * What a line is: a diff header; a commit line that ends a section; a hunk
+ * What a line is: a diff header; a commit line; a hunk
  * header; a line inside a private-key block, END included; a line that opens
  * one; an END with no BEGIN, from a block whose start isn't shown; or other.
  */
@@ -345,14 +347,13 @@ type Role = "header" | "commit" | "hunk" | "key" | "begin" | "end" | "text";
 
 /**
  * A line's role, and the state after it; `kind` says which section a diff
- * header opens. A header, a commit line that ends a section and a hunk header
- * each end a key block, since none can be part of one, and a hunk may start
- * inside one unseen. Outside a section, a key's base64 line can look like a
- * commit line, so it ends nothing.
+ * header opens. A header, a commit line and a hunk header each end a key
+ * block, since none can be part of one, and a hunk may start inside one
+ * unseen; a commit line ends a section too.
  */
 function step(s: State, line: string, kind: (header: string) => Section): [Role, State] {
   if (DIFF_HEADER.test(line)) return ["header", { section: kind(line), inKey: false }];
-  if (s.section !== "none" && COMMIT_LINE.test(line)) return ["commit", START];
+  if (COMMIT_LINE.test(line)) return ["commit", START];
   if (HUNK.test(line)) return ["hunk", { section: s.section, inKey: false }];
   if (s.inKey) return ["key", { section: s.section, inKey: !PEM_END.test(line) }];
   const begins = PEM_BEGIN.test(line);
@@ -364,11 +365,21 @@ function step(s: State, line: string, kind: (header: string) => Section): [Role,
 // Lines past which a private-key block may have opened unseen.
 const RESTARTS = new Set<Role>(["header", "commit", "hunk", "end"]);
 
-/** The state after lines, from the start of an output. */
-function stateAfter(lines: Iterable<string>, kind: (header: string) => Section): State {
-  let s = START;
-  for (const line of lines) s = step(s, line, kind)[1];
-  return s;
+/**
+ * The state after lines, from the start of an output, how many lines there
+ * are, and the index of the last past which a block may have opened unseen.
+ */
+function stateAfter(lines: Iterable<string>, kind: (header: string) => Section) {
+  let state = START;
+  let count = 0;
+  let restart = -1;
+  for (const line of lines) {
+    const [role, next] = step(state, line, kind);
+    state = next;
+    if (RESTARTS.has(role)) restart = count;
+    count++;
+  }
+  return { state, count, restart };
 }
 
 /**
@@ -405,17 +416,30 @@ export function filterOutput(text: string, cfg: Config, how: Filter, place: Plac
   };
   const names = (line: string) => line.split(WORDS).some((w) => folderIn(w, folders) !== undefined);
   const out: (string | undefined)[] = [];
-  let state = stateAfter(place.before, kind);
+  const start = stateAfter(place.before, kind);
+  let state = start.state;
   let from = 0;
   let removed = 0;
+  // Where in `out` pi's own lines are, which no END drops.
+  const pis = new Set<number>();
+  const dropBack = () => {
+    for (let k = from; k < out.length; k++) if (!pis.has(k)) out[k] = undefined;
+  };
   const lines = text.split("\n");
   const omission = place.omission && isOmission(lines[place.omission.at] ?? "") ? place.omission : undefined;
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
     // pi's marker, and the blank line on each side of it, are no part of the output.
     if (omission && Math.abs(i - omission.at) <= 1) {
+      pis.add(out.length);
       out.push(line);
-      if (i === omission.at) state = stateAfter(omission.before, kind);
+      if (i === omission.at) {
+        const resumed = stateAfter(omission.before, kind);
+        state = resumed.state;
+        // A restart from the line the head ends on, which may show only its
+        // start, is in the part left out, and an END drops back no further.
+        if (resumed.restart >= start.count + omission.at - 2) from = out.length;
+      }
       continue;
     }
     const whole = place.parts.get(i);
@@ -426,7 +450,7 @@ export function filterOutput(text: string, cfg: Config, how: Filter, place: Plac
     let fate: string | undefined;
     if (state.section === "protected" || (!long && names(full))) removed++;
     else if (how.redact !== "all" && state.section !== "secret") fate = long ? MARK : redactMatch(full, cfg);
-    else if (role === "end") out.fill(undefined, from);
+    else if (role === "end") dropBack();
     else if (role === "hunk" && state.section === "secret") fate = HUNK.exec(full)?.[0];
     else if (long && role !== "key") fate = MARK;
     else if (role !== "key") {

@@ -95,7 +95,9 @@ test("temp directories need no OK, except their root", () => {
     ["deletes recursively, and /tmp/x*/../../etc is a glob, so what it deletes depends on what is there"],
     "climbing out after a glob",
   );
-  assert.deepEqual(asks(`rm -rf ${t}`), ["deletes recursively"]);
+  // The roots ask, TMPDIR's too, unless it lies inside another, as /tmp/x does.
+  assert.deepEqual(asks("rm -rf /tmp"), ["deletes recursively"]);
+  if (!/^\/(?:private\/)?tmp\//.test(t)) assert.deepEqual(asks(`rm -rf ${t}`), ["deletes recursively"]);
   // Relative targets count where they resolve, unless the command changes directory.
   assert.deepEqual(asks("rm -rf build", DEFAULTS, "/tmp/work"), []);
   assert.deepEqual(asks("cd ~ && rm -rf build", DEFAULTS, "/tmp/work"), ["deletes recursively"]);

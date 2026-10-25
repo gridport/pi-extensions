@@ -333,6 +333,18 @@ test("redaction", () => {
     "a base64 line that looks like a commit line",
   );
   assert.equal(
+    secretText(
+      "diff --git a/.env b/.env\n@@ -1,4 +1,4 @@\n-----BEGIN PRIVATE KEY-----\nabcdef01/xyzQ\nMIIE\n-----END PRIVATE KEY-----\nB=2",
+    ),
+    `diff --git a/.env b/.env\n@@ -1,4 +1,4 @@\n${MARK}\nB=2`,
+    "the same in a secret file's section, as --word-diff shows it, with no + or - in front",
+  );
+  assert.equal(
+    drop("diff --git a/.env b/.env\n@@ -1 +1 @@\nadd more\nAPI_KEY=sk-1"),
+    `diff --git a/.env b/.env\n@@ -1 +1 @@\nadd more\nAPI_KEY=${MARK}`,
+    "a short word of hex letters, as --word-diff may show it, is no commit line",
+  );
+  assert.equal(
     grepLines(
       [
         ".env:3: API_KEY=abc",
@@ -687,6 +699,33 @@ test("codemode's copy resumes inside a secret file's section that opens in the p
   // A tail cut just before a newline starts with what is left of its line: nothing.
   const end = longOutput("c0e3", { head: "PORT=80\n", middle: "API_KEY=sk-1", tail: "\nX=2\n", fill: "X=1" });
   assert.equal(copyOf("cat .env", end), end.copy.replace("]\n\n\nX=2\n", `]\n\n${MARK}\nX=2\n`));
+});
+
+test("an END with no BEGIN in codemode's tail drops back no further than the part left out", async () => {
+  const g = load(ext);
+  await g.start(repo());
+  const copyOf = (out: { copy: string; details: unknown }) =>
+    g.result("bash", { command: "git log -p" }, "x", { output: out.copy, truncated: true }, out.details)
+      ?.structuredContent.output ?? out.copy;
+  const tail = " MIIEtail1\n -----END PRIVATE KEY-----\n";
+  // A hunk in the part left out, where the block may have opened: the head stays.
+  const left = longOutput("d0e0", {
+    head: "diff --git a/.env b/.env\n@@ -1,3 +1,3 @@\n+A=1\n",
+    middle: "@@ -9000,5 +9000,5 @@\n MIIEmiddle\n",
+    tail,
+    fill: " ok",
+  });
+  assert.equal(copyOf(left), left.copy.replace(tail, ""));
+  // None there: the block may have opened anywhere after the head's hunk, so
+  // the head's lines after it go too, but not pi's marker.
+  const head = longOutput("d0e1", {
+    head: "diff --git a/.env b/.env\n@@ -1,3 +1,3 @@\n",
+    middle: " MIIEmiddle\n",
+    tail,
+    fill: " MIIEfill",
+  });
+  const marker = /\n\n\[\.\.\. \d+ bytes omitted \.\.\.\]\n\n/.exec(head.copy)?.[0];
+  assert.equal(copyOf(head), `diff --git a/.env b/.env\n@@ -1,3 +1,3 @@${marker}${head.copy.split(tail)[1]}`);
 });
 
 test("a tail of one long line is judged by the whole line", async () => {
