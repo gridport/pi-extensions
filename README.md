@@ -79,9 +79,11 @@ Settings go under `commandGuard` in `settings.json`:
 | ---------------- | ------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `builtins`       | `["rm", "sudo", "find"]` | Which built-in checks run: `rm` catches a recursive rm, `sudo` anything run through sudo or doas, and `find` a find with `-delete`, or with `-exec`, `-execdir` or `-ok` running rm                                                                                                                                               |
 | `rules`          | `[]`                     | More commands to confirm, such as `{ "command": "git reset", "args": ["--hard"], "reason": "discards uncommitted work" }`. A rule matches a command that starts with those words, in order. If `args` is given, the command must also include one of them. A short flag such as `-f` also matches inside a cluster such as `-fd`. |
+| `allowFolders`   | `[]`                     | Folder names, such as `node_modules` or `dist`, that a recursive rm or find may delete, or delete inside, without asking. Global settings only.                                                                                                                                                                                   |
 | `timeoutSeconds` | `120`                    | How long the question waits. No answer counts as no.                                                                                                                                                                                                                                                                              |
 - **Splitting:** commands are split as the shell would split them. That covers pipelines, `&&` chains, `bash -c '…'`, `eval`, `xargs`, `env` and `sudo`, and what `echo` or a here-document pipes into a shell. Text inside a quoted argument or a here-document, such as a commit message, isn't mistaken for a command.
-- **Temp directories:** a recursive rm or find whose targets all lie inside a temp directory runs without asking.
+- **No question needed:** a recursive rm or find runs without asking when every target lies inside a temp directory, or is or lies inside an allowed folder below the session's folder, such as `rm -rf node_modules dist/*`. Each target is judged where its symlinks lead. A target with a variable or `{…}`, `..` after a glob, or a relative target after a `cd` in the same command, always asks. A glob counts by the part before it, so `packages/*/dist` asks.
+- **Variables and globs:** when a target that needs asking has a variable or a glob, the question says so, such as "`$DIR` has a variable in it, so it could point anywhere".
 - **No UI:** where nobody can be asked, such as print mode or a subagent, the command is refused.
 
 ## Subagents
@@ -90,7 +92,7 @@ With [pi-subagents](https://www.npmjs.com/package/pi-subagents) installed in pi'
 
 ## Settings scope
 
-For both guards, the global `~/.pi/agent/settings.json` decides. A project's `.pi/settings.json` can add folders, keys, checks and rules, but can't remove any. Only the global settings set `timeoutSeconds`.
+For both guards, the global `~/.pi/agent/settings.json` decides. A project's `.pi/settings.json` can add folders, keys, checks and rules, but can't remove any. Only the global settings set `timeoutSeconds` and `allowFolders`, since a folder there lets deletes run without asking.
 
 ## Limits
 

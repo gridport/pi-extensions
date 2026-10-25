@@ -22,7 +22,6 @@ test("the built-ins: recursive rm, sudo, deleting find", () => {
     "\\rm -rf x",
     "rm -rf /tmp",
     "rm -rf /tmp/ok ~/not",
-    "rm -rf $DIR",
     "rm -rf -- -r",
   ]) {
     assert.deepEqual(asks(line), ["deletes recursively"], line);
@@ -65,7 +64,10 @@ test("found wherever the shell would run it", () => {
     "ls | xargs --max-args 1 rm -rf",
     "function clean { rm -rf ~/x; }; clean",
   ]) {
-    assert.ok(asks(line).includes("deletes recursively"), line);
+    assert.ok(
+      asks(line).some((r) => r.startsWith("deletes recursively")),
+      line,
+    );
   }
 });
 
@@ -88,9 +90,13 @@ test("temp directories need no OK, except their root", () => {
   assert.deepEqual(asks("find /tmp/build -delete"), []);
   assert.deepEqual(asks("rm -rf /tmp/../etc"), ["deletes recursively"]);
   assert.deepEqual(asks("rm -rf /tmp/{x,../etc}"), ["deletes recursively"], "a brace expansion");
-  assert.deepEqual(asks("rm -rf /tmp/x*/../../etc"), ["deletes recursively"], "climbing out after a glob");
+  assert.deepEqual(
+    asks("rm -rf /tmp/x*/../../etc"),
+    ["deletes recursively, and /tmp/x*/../../etc is a glob, so what it deletes depends on what is there"],
+    "climbing out after a glob",
+  );
   assert.deepEqual(asks(`rm -rf ${t}`), ["deletes recursively"]);
-  // Relative targets count only when the session works in a temp directory and stays there.
+  // Relative targets count where they resolve, unless the command changes directory.
   assert.deepEqual(asks("rm -rf build", DEFAULTS, "/tmp/work"), []);
   assert.deepEqual(asks("cd ~ && rm -rf build", DEFAULTS, "/tmp/work"), ["deletes recursively"]);
   assert.deepEqual(asks("rm -rf build"), ["deletes recursively"]);
@@ -99,11 +105,48 @@ test("temp directories need no OK, except their root", () => {
     ["deletes recursively"],
     "no operands, so the targets are unknown",
   );
+  // The question says when a target has a variable or a glob.
+  assert.deepEqual(asks("rm -rf $DIR", DEFAULTS, "/tmp/work"), [
+    "deletes recursively, and $DIR has a variable in it, so it could point anywhere",
+  ]);
+  assert.deepEqual(asks(`rm -rf /tmp/x "$(pwd)/y"`), [
+    "deletes recursively, and $(pwd)/y has a variable in it, so it could point anywhere",
+  ]);
+  assert.deepEqual(asks(`rm -rf ${t}/ok* ~/w*`), [
+    "deletes recursively, and ~/w* is a glob, so what it deletes depends on what is there",
+  ]);
+  assert.deepEqual(asks("find $D -delete"), [
+    "deletes the files find matches, and $D has a variable in it, so it could point anywhere",
+  ]);
+});
+
+test("folders named in allowFolders need no OK, from the session's folder down", () => {
+  const cfg = loadConfig(undefined, { allowFolders: ["node_modules", "dist"] }).config;
+  const proj = join(HOME, "command-guard-no-such-project");
+  const ask = (line: string, cwd = proj) => check(line, cwd, cfg);
+  assert.deepEqual(ask("rm -rf node_modules dist/* ./packages/a/node_modules/.cache"), []);
+  assert.deepEqual(ask(`rm -rf ${proj}/dist && find dist -name '*.map' -delete`), []);
+  assert.deepEqual(check("rm -rf node_modules", proj, DEFAULTS), ["deletes recursively"], "none by default");
+  assert.deepEqual(ask("rm -rf node_modules src"), ["deletes recursively"], "every target");
+  assert.deepEqual(ask("rm -rf node_modules/.."), ["deletes recursively"]);
+  assert.deepEqual(ask("cd .. && rm -rf dist"), ["deletes recursively"], "a relative target after a cd");
   assert.deepEqual(
-    asks("rm -rf $DIR", DEFAULTS, "/tmp/work"),
+    ask("rm -rf src", join(proj, "dist")),
     ["deletes recursively"],
-    "a variable could point anywhere",
+    "the session's own folder",
   );
+  assert.deepEqual(ask(`rm -rf ${proj}-old/dist`), ["deletes recursively"], "a folder its name starts");
+  assert.deepEqual(ask("rm -rf packages/*/dist"), [
+    "deletes recursively, and packages/*/dist is a glob, so what it deletes depends on what is there",
+  ]);
+  // A symlink is judged by where it leads.
+  const dir = mkdtempSync(join(tmpdir(), "command-guard-"));
+  try {
+    symlinkSync(HOME, join(dir, "node_modules"));
+    assert.deepEqual(ask("rm -rf node_modules/x", dir), ["deletes recursively"]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test("a symlink in a temp directory is judged by where it leads", () => {
@@ -150,20 +193,22 @@ test("settings: a project can add but not remove", () => {
   const rule = { command: "git reset", args: ["--hard"] };
   // The merged view holds the project's lists, which replaced the global ones.
   const { config, problems } = loadConfig(
-    { builtins: [], rules: [rule], timeoutSeconds: 1 },
-    { rules: [{ command: "kubectl delete" }], timeoutSeconds: 60 },
+    { builtins: [], rules: [rule], timeoutSeconds: 1, allowFolders: ["src"] },
+    { rules: [{ command: "kubectl delete" }], timeoutSeconds: 60, allowFolders: ["dist"] },
   );
   assert.deepEqual(config.builtins, ["rm", "sudo", "find"]);
   assert.deepEqual(config.rules, [{ command: "kubectl delete" }, rule]);
   assert.equal(config.timeoutSeconds, 60);
+  assert.deepEqual(config.allowFolders, ["dist"], "only the global settings allow folders");
   assert.deepEqual(problems, []);
   const bad = loadConfig(undefined, {
     builtins: ["rm", "dd"],
     rules: [{ command: "" }, { command: "x", args: "y" }, "z"],
     timeoutSeconds: -1,
+    allowFolders: ["dist", "a/b", "..", "", 3],
   });
-  assert.deepEqual(bad.config, { builtins: ["rm"], rules: [], timeoutSeconds: 120 });
-  assert.equal(bad.problems.length, 5);
+  assert.deepEqual(bad.config, { builtins: ["rm"], rules: [], allowFolders: ["dist"], timeoutSeconds: 120 });
+  assert.equal(bad.problems.length, 9);
 });
 
 test("asks with a 2-minute timeout, and runs only on yes", async () => {

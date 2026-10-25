@@ -12,6 +12,10 @@
  *                   A rule matches a command that starts with those words, in
  *                   order, and, when args are given, has one of them. A short
  *                   flag such as -f also matches inside a cluster such as -fd.
+ *   allowFolders    Folder names, such as node_modules or dist, that a recursive
+ *                   rm or find may delete, or delete inside, without asking,
+ *                   below the session's folder. Default []. Global settings
+ *                   only.
  *   timeoutSeconds  How long the question waits before it counts as a no.
  *                   Default 120.
  *
@@ -20,7 +24,8 @@
  * or a here-document pipes into a shell, while text inside a
  * quoted argument or a here-document, such as a commit message, is not taken
  * for a command. A recursive rm or find whose targets all lie inside a temp
- * directory runs without asking. Where nobody can be asked (print mode,
+ * directory or an allowed folder runs without asking; the question says when a
+ * target has a variable or a glob. Where nobody can be asked (print mode,
  * subagents), the command is refused. With pi-subagents installed, its
  * subagents load this guard too.
  */
@@ -43,10 +48,16 @@ export interface Rule {
 export interface Config {
   builtins: string[];
   rules: Rule[];
+  allowFolders: string[];
   timeoutSeconds: number;
 }
 
-export const DEFAULTS: Config = { builtins: ["rm", "sudo", "find"], rules: [], timeoutSeconds: 120 };
+export const DEFAULTS: Config = {
+  builtins: ["rm", "sudo", "find"],
+  rules: [],
+  allowFolders: [],
+  timeoutSeconds: 120,
+};
 const BUILTINS = new Set(DEFAULTS.builtins);
 
 function validRule(r: unknown): r is Rule {
@@ -62,7 +73,8 @@ function validRule(r: unknown): r is Rule {
 
 /**
  * The global settings decide; a project's settings can only add builtins and
- * rules. The timeout comes from the global settings alone.
+ * rules. The timeout and the allowed folders, which let deletes run without
+ * asking, come from the global settings alone.
  */
 export function loadConfig(merged: unknown, global: unknown): { config: Config; problems: string[] } {
   const m = (merged ?? {}) as Record<string, unknown>;
@@ -86,10 +98,16 @@ export function loadConfig(merged: unknown, global: unknown): { config: Config; 
     if (!seen.has(key)) rules.push(r);
     seen.add(key);
   }
+  // Folder names only, so no entry can be a path such as / or ~.
+  const allowFolders = [...new Set(list(g.allowFolders))].filter((f) => {
+    if (typeof f === "string" && f !== "" && f !== "." && f !== ".." && !f.includes("/")) return true;
+    problems.push(`invalid allowFolders entry ${JSON.stringify(f)}`);
+    return false;
+  });
   const t = g.timeoutSeconds;
   const timeoutSeconds = typeof t === "number" && t > 0 ? t : DEFAULTS.timeoutSeconds;
   if (t !== undefined && timeoutSeconds !== t) problems.push(`invalid timeoutSeconds ${JSON.stringify(t)}`);
-  return { config: { builtins, rules, timeoutSeconds }, problems };
+  return { config: { builtins, rules, allowFolders, timeoutSeconds }, problems };
 }
 
 // Only the temp directories themselves: on macOS TMPDIR lies under
@@ -105,24 +123,54 @@ const TEMP_ROOTS = [
 
 const underTemp = (p: string) => TEMP_ROOTS.some((root) => p.startsWith(`${root}/`));
 
+/** Whether a path lies below `root` inside a folder with one of `names`; `root`'s own folders don't count. */
+const inNamed = (p: string, root: string, names: string[]) =>
+  p.startsWith(`${root}/`) &&
+  p
+    .slice(root.length + 1)
+    .split("/")
+    .some((part) => names.includes(part));
+
 /**
- * Whether every target lies inside a temp directory, and not at its root. A
- * relative target counts only when the session itself works in a temp
- * directory and the command changes no directory.
+ * Whether a recursive delete can remove a target without asking: it lies
+ * inside a temp directory, and not at its root, or is or lies inside a folder
+ * named in `folders`, below the session's folder. Either is judged on the path
+ * and on where its symlinks lead, and a glob by the part before it. A relative
+ * target counts only when the command changes no directory: pi runs each
+ * command from the session's folder.
  */
-export function allInTemp(targets: string[], cwd: string, changesDir: boolean): boolean {
-  if (!targets.length) return false;
-  return targets.every((t) => {
-    // A variable, a substitution or a brace expansion could point anywhere.
-    if (/[$`{]/.test(t)) return false;
-    // So could .. after a glob, which the stem below leaves out.
-    const glob = t.search(/[*?[]/);
-    if (glob >= 0 && t.slice(glob).split("/").includes("..")) return false;
-    const stem = expandHome(t).split(/[*?[]/)[0];
-    if (!stem || (!isAbsolute(stem) && (changesDir || !underTemp(realOrSame(cwd))))) return false;
-    const abs = resolve(cwd, stem);
-    return underTemp(abs) && underTemp(realOrSame(abs));
-  });
+function exempt(t: string, cwd: string, changesDir: boolean, folders: string[]): boolean {
+  // A variable, a substitution or a brace expansion could point anywhere.
+  if (/[$`{]/.test(t)) return false;
+  // So could .. after a glob, which the stem below leaves out.
+  const glob = t.search(/[*?[]/);
+  if (glob >= 0 && t.slice(glob).split("/").includes("..")) return false;
+  const stem = expandHome(t).split(/[*?[]/)[0];
+  if (!stem || (!isAbsolute(stem) && changesDir)) return false;
+  const abs = resolve(cwd, stem);
+  const real = realOrSame(abs);
+  if (underTemp(abs) && underTemp(real)) return true;
+  return inNamed(abs, resolve(cwd), folders) && inNamed(real, realOrSame(resolve(cwd)), folders);
+}
+
+/**
+ * What a recursive delete needs the user's OK for, if anything: `does`, and
+ * what makes a target that isn't exempt impossible to check, a variable or a
+ * glob. Empty when every target is exempt.
+ */
+function deleteReason(
+  does: string,
+  targets: string[],
+  cwd: string,
+  changesDir: boolean,
+  cfg: Config,
+): string {
+  const left = targets.filter((t) => !exempt(t, cwd, changesDir, cfg.allowFolders));
+  if (targets.length && !left.length) return "";
+  const variable = left.find((t) => /[$`]/.test(t));
+  if (variable) return `${does}, and ${variable} has a variable in it, so it could point anywhere`;
+  const glob = left.find((t) => /[*?[]/.test(t));
+  return glob ? `${does}, and ${glob} is a glob, so what it deletes depends on what is there` : does;
 }
 
 function operands(argv: string[]): string[] {
@@ -195,21 +243,15 @@ export function check(line: string, cwd: string, cfg: Config): string[] {
     if (cfg.builtins.includes("sudo") && asRoot.some((w) => w === "sudo" || w === "doas"))
       reasons.push("runs as root");
     if (!argv.length) continue;
-    if (
-      cfg.builtins.includes("rm") &&
-      name === "rm" &&
-      recursive(argv) &&
-      !allInTemp(operands(argv), cwd, changesDir)
-    ) {
-      reasons.push("deletes recursively");
+    if (cfg.builtins.includes("rm") && name === "rm" && recursive(argv)) {
+      reasons.push(deleteReason("deletes recursively", operands(argv), cwd, changesDir, cfg));
     }
     if (
       cfg.builtins.includes("find") &&
       name === "find" &&
-      (argv.includes("-delete") || runs.some((r) => r.name === "rm")) &&
-      !allInTemp(findStarts(argv), cwd, changesDir)
+      (argv.includes("-delete") || runs.some((r) => r.name === "rm"))
     ) {
-      reasons.push("deletes the files find matches");
+      reasons.push(deleteReason("deletes the files find matches", findStarts(argv), cwd, changesDir, cfg));
     }
     for (const rule of cfg.rules) {
       if (ruleMatches(rule, argv))
@@ -218,7 +260,7 @@ export function check(line: string, cwd: string, cfg: Config): string[] {
         );
     }
   }
-  return [...new Set(reasons)];
+  return [...new Set(reasons)].filter(Boolean);
 }
 
 export default function (pi: ExtensionAPI) {
