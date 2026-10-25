@@ -18,21 +18,60 @@ import commandGuard from "../extensions/command-guard.ts";
 import ext, {
   bashHit,
   DEFAULTS,
-  dropProtected,
+  type Filter,
+  filterOutput,
   isSecretFile,
   loadConfig,
   MARK,
   protectedPath,
   redactLine,
-  redactMatches,
-  redactText,
   secretName,
 } from "../extensions/secret-guard.ts";
+import type { Placement } from "../src/pi-output.ts";
 import { fakeSubagents, fixtures, load } from "./guard-harness.ts";
 
 const F = DEFAULTS.folders;
 const K = DEFAULTS.redactKeys;
 const REMOVED = (n: number) => `[secret-guard: removed ${n} line(s) from protected folders]`;
+const filter = (how: Filter) => (text: string, place?: Placement) => filterOutput(text, DEFAULTS, how, place);
+// A secret file's text, grep lines, and output with protected lines dropped.
+const secretText = filter({ protect: false, redact: "all" });
+const grepLines = filter({ protect: false, redact: "matches" });
+const drop = filter({ protect: true, redact: "matches" });
+
+const HALF = 512 * 1024;
+/** Lines of `n` bytes in all, n at least 100: `line` padded with x's, to 100 bytes but the last. */
+const filler = (line: string, n: number) => {
+  const count = Math.floor(n / 100) - 1;
+  const lines = `${line.padEnd(99, "x")}\n`.repeat(count);
+  return `${lines}${line.padEnd(n - count * 100 - 1, "x")}\n`;
+};
+
+/**
+ * A bash output over 1 MiB, written to a pi-bash log, and codemode's copy of
+ * it, as pi makes it from the log: the first and last half MiB around a marker.
+ * The output is `head`, filler lines, `middle`, then `tail` and filler lines
+ * that make up the last half MiB, so the copy resumes at `tail`.
+ */
+function longOutput(name: string, parts: { head: string; middle: string; tail: string; fill: string }) {
+  const log = [
+    parts.head,
+    filler(parts.fill, 600_000 - Buffer.byteLength(parts.head)),
+    parts.middle,
+    parts.tail,
+    filler(parts.fill, HALF - Buffer.byteLength(parts.tail)),
+  ].join("");
+  const path = join(root, `pi-bash-${name}.log`);
+  writeFileSync(path, log);
+  const bytes = Buffer.from(log);
+  const copy = `${bytes.subarray(0, HALF)}\n\n[... ${bytes.length - 2 * HALF} bytes omitted ...]\n\n${parts.tail}${filler(parts.fill, HALF - Buffer.byteLength(parts.tail))}`;
+  const lines = log.split("\n").length;
+  const details = {
+    truncation: { truncated: true, totalLines: lines, outputLines: 1 },
+    fullOutputPath: path,
+  };
+  return { copy, details };
+}
 let root = "";
 let savedHome: string | undefined;
 before(() => {
@@ -178,7 +217,7 @@ test("a long line of URLs is redacted in bounded time", () => {
     (_, i) => `{"id":${i},"url":"http://localhost:3000/items/${i}"}`,
   );
   const started = performance.now();
-  assert.equal(redactText(items.join(","), K), items.join(","));
+  assert.equal(secretText(items.join(",")), items.join(","));
   assert.ok(performance.now() - started < 500, "a 570 KB line took over 500 ms");
 });
 
@@ -193,7 +232,7 @@ test("a line of @ signs is redacted in bounded time", () => {
 test("a line of pi's log nested in itself is redacted in bounded time", () => {
   const line = `${"pi-bash-a.log:".repeat(80_000)}1: x`;
   const started = performance.now();
-  assert.equal(redactMatches(line, DEFAULTS), line);
+  assert.equal(grepLines(line), line);
   assert.ok(performance.now() - started < 500, "a 1.1 MB line took over 500 ms");
 });
 
@@ -201,7 +240,7 @@ test("many END lines with no BEGIN are redacted in bounded time", () => {
   // Each drops the lines back to where a block could have started unseen.
   const ends = Array.from({ length: 100_000 }, () => "-----END RSA PRIVATE KEY-----").join("\n");
   const started = performance.now();
-  assert.equal(redactText(ends, K), "");
+  assert.equal(secretText(ends), "");
   assert.ok(performance.now() - started < 500, "100,000 END lines took over 500 ms");
 });
 
@@ -277,17 +316,24 @@ test("redaction", () => {
     '-----END RSA PRIVATE KEY-----"',
     "B=2",
   ].join("\n");
-  assert.equal(redactText(pem, K), ["A=1", `TLS_CERT=${MARK}`, "B=2"].join("\n"));
+  assert.equal(secretText(pem), ["A=1", `TLS_CERT=${MARK}`, "B=2"].join("\n"));
+  assert.equal(secretText('K="-----BEGIN PRIVATE KEY-----\\nabc\\n-----END PRIVATE KEY-----"'), `K=${MARK}`);
   assert.equal(
-    redactText('K="-----BEGIN PRIVATE KEY-----\\nabc\\n-----END PRIVATE KEY-----"', K),
-    `K=${MARK}`,
-  );
-  assert.equal(
-    redactText("-----BEGIN PGP PRIVATE KEY BLOCK-----\nlQOYBF\n-----END PGP PRIVATE KEY BLOCK-----\nB=2", K),
+    secretText("-----BEGIN PGP PRIVATE KEY BLOCK-----\nlQOYBF\n-----END PGP PRIVATE KEY BLOCK-----\nB=2"),
     `${MARK}\nB=2`,
   );
   assert.equal(
-    redactMatches(
+    secretText("K=-----BEGIN PRIVATE KEY-----x-----END PRIVATE KEY-----\nB=2"),
+    `K=${MARK}\nB=2`,
+    "a block on one line",
+  );
+  assert.equal(
+    secretText("-----BEGIN PRIVATE KEY-----\nabcdef0123/AbC+d\nMIIE\n-----END PRIVATE KEY-----\nB=2"),
+    `${MARK}\nB=2`,
+    "a base64 line that looks like a commit line",
+  );
+  assert.equal(
+    grepLines(
       [
         ".env:3: API_KEY=abc",
         "app.py:3: API_KEY = os.environ['API_KEY']",
@@ -296,7 +342,6 @@ test("redaction", () => {
         ".env.local:TOKEN=t",
         "backups/2024-01-15/.env:3: API_KEY=x",
       ].join("\n"),
-      DEFAULTS,
     ),
     [
       `.env:3: API_KEY=${MARK}`,
@@ -309,8 +354,39 @@ test("redaction", () => {
   );
 });
 
+test("an END with no BEGIN drops lines back only to where a block could have opened unseen", () => {
+  const end = "-----END RSA PRIVATE KEY-----";
+  assert.equal(
+    drop(`diff --git a/b.md b/b.md\n+ok\ndiff --git a/.env b/.env\n+${end}\n+B=3`),
+    "diff --git a/b.md b/b.md\n+ok\ndiff --git a/.env b/.env\n+B=3",
+    "back to its section's header",
+  );
+  assert.equal(
+    secretText(`diff --git a/.env b/.env\n@@ -1 +1 @@\n+A=1\nabc1234f next\nB=2\n${end}`),
+    "diff --git a/.env b/.env\n@@ -1 +1 @@\n+A=1\nabc1234f next",
+    "back to the commit line that ended the section",
+  );
+});
+
+test("a copy's placement counts only where it fits the copy", () => {
+  const none = new Map<number, string>();
+  assert.equal(
+    drop("diff --git a/vault/t.txt b/vault/t.txt\n+A1\n+A2", {
+      before: [],
+      parts: none,
+      omission: { at: 1, before: [] },
+    }),
+    REMOVED(3),
+    "no marker where the omission is",
+  );
+  assert.equal(
+    secretText("unrelated", { before: [], parts: new Map([[0, "API_KEY=sk"]]) }),
+    "unrelated",
+    "a line given as part of a line it isn't in",
+  );
+});
+
 test("lines and git diffs naming a path into a protected folder are dropped", () => {
-  const drop = (text: string) => dropProtected(text, F);
   assert.equal(
     drop("a.md:1: x\nvault/s.txt:1: secret\nb.md:2: see vault.md\nmyvault/x:1: y"),
     `a.md:1: x\nb.md:2: see vault.md\nmyvault/x:1: y\n${REMOVED(1)}`,
@@ -362,7 +438,10 @@ test("lines and git diffs naming a path into a protected folder are dropped", ()
     ["0123abc a --oneline commit", "diff --git a/b.md b/b.md", "+ok", REMOVED(4)].join("\n"),
   );
   assert.equal(
-    dropProtected("+A2\n+A3\ndiff --git a/b.md b/b.md\n+ok", F, { inSection: true }),
+    drop("+A2\n+A3\ndiff --git a/b.md b/b.md\n+ok", {
+      before: ["diff --git a/vault/t.txt b/vault/t.txt", "+A1"],
+      parts: new Map(),
+    }),
     `diff --git a/b.md b/b.md\n+ok\n${REMOVED(2)}`,
     "text that starts inside a section",
   );
@@ -573,38 +652,64 @@ test("a private-key block is dropped, though only part of it shows", async () =>
 test("codemode's copy resumes inside a secret file's section that opens in the part it leaves out", async () => {
   const g = load(ext);
   await g.start(repo());
-  const lines = [
-    "diff --git a/b.md b/b.md",
-    "+ok",
-    "diff --git a/.env b/.env",
-    "+API_KEY_0ab1c2d3=tok-1",
-    "+PASSWORD=pw-2",
-    "diff --git a/c.md b/c.md",
-    "+fine",
-  ];
-  const log = join(root, "pi-bash-c0e0.log");
-  writeFileSync(log, lines.join("\n"));
-  const details = { truncation: { truncated: true, totalLines: 7, outputLines: 4 }, fullOutputPath: log };
-  // The tail starts partway through a line, whose name may be cut off; here
-  // what's left looks like a commit line.
-  const omitted = "\n\n[... 9 bytes omitted ...]\n\n";
-  const cut = `${lines.slice(0, 2).join("\n")}${omitted}0ab1c2d3=tok-1\n${lines.slice(4).join("\n")}`;
-  const copy = g.result("bash", { command: "git diff" }, "x", { output: cut, truncated: true }, details);
+  // codemode's copy as the guard leaves it, unchanged if it returns nothing.
+  const copyOf = (command: string, out: { copy: string; details: unknown }) =>
+    g.result("bash", { command }, "x", { output: out.copy, truncated: true }, out.details)?.structuredContent
+      .output ?? out.copy;
+  // The tail starts partway through a line, whose name it cuts off; what's
+  // left looks like a commit line. Its whole line, in pi's log, has the name.
+  const diff = longOutput("c0e0", {
+    head: "diff --git a/b.md b/b.md\n",
+    middle: "diff --git a/.env b/.env\n+API_KEY_",
+    tail: "0ab1c2d3=tok-1\n+PASSWORD=pw-2\ndiff --git a/c.md b/c.md\n",
+    fill: "+ok",
+  });
   assert.equal(
-    copy.structuredContent.output,
-    `${lines.slice(0, 2).join("\n")}${omitted}${MARK}\n+PASSWORD=${MARK}\n${lines.slice(5).join("\n")}`,
+    copyOf("git diff", diff),
+    diff.copy.replace("\n0ab1c2d3=tok-1\n+PASSWORD=pw-2\n", `\n${MARK}\n+PASSWORD=${MARK}\n`),
   );
   // A command that prints a secret file, with no diff in it, cuts off a name the same way.
-  const env = join(root, "pi-bash-c0e1.log");
-  writeFileSync(env, "PORT=80\nAPI_KEY_0ab1c2d3=tok-1\nX=1");
-  const printed = g.result(
-    "bash",
-    { command: "cat .env" },
-    "x",
-    { output: `PORT=80${omitted}0ab1c2d3=tok-1\nX=1`, truncated: true },
-    { truncation: { truncated: true, totalLines: 3, outputLines: 2 }, fullOutputPath: env },
-  );
-  assert.equal(printed.structuredContent.output, `PORT=80${omitted}${MARK}\nX=1`);
+  const env = longOutput("c0e1", {
+    head: "PORT=80\n",
+    middle: "API_KEY_",
+    tail: "0ab1c2d3=tok-1\n",
+    fill: "X=1",
+  });
+  assert.equal(copyOf("cat .env", env), env.copy.replace("\n0ab1c2d3=tok-1\n", `\n${MARK}\n`));
+  // A line whose whole line holds no secret is kept as it is.
+  const plain = longOutput("c0e2", {
+    head: "PORT=80\n",
+    middle: "NOTE_",
+    tail: "0ab1c2d3=hello\n",
+    fill: "X=1",
+  });
+  assert.equal(copyOf("cat .env", plain), plain.copy);
+  // A tail cut just before a newline starts with what is left of its line: nothing.
+  const end = longOutput("c0e3", { head: "PORT=80\n", middle: "API_KEY=sk-1", tail: "\nX=2\n", fill: "X=1" });
+  assert.equal(copyOf("cat .env", end), end.copy.replace("]\n\n\nX=2\n", `]\n\n${MARK}\nX=2\n`));
+});
+
+test("a tail of one long line is judged by the whole line", async () => {
+  const g = load(ext);
+  await g.start(repo());
+  const value = "7".repeat(60_000);
+  const log = join(root, "pi-bash-1013.log");
+  const notice = `[Showing last 48.8KB of line 2 (line is 58.6KB). Full output: ${log}]`;
+  const details = {
+    truncation: { truncated: true, totalLines: 2, outputLines: 1, lastLinePartial: true },
+    fullOutputPath: log,
+  };
+  for (const [command, output] of [
+    ["cat .env", `PORT=80\nAPI_KEY=${value}`],
+    ["git diff", `diff --git a/.env b/.env\n+API_KEY=${value}`],
+  ]) {
+    writeFileSync(log, output);
+    const tail = `${value.slice(10_000)}\n\n${notice}`;
+    assert.equal(
+      g.result("bash", { command }, tail, undefined, details).content[0].text,
+      `${MARK}\n\n${notice}`,
+    );
+  }
 });
 
 test("a line that only looks like codemode's omission marker leaves nothing out", async () => {
@@ -657,14 +762,21 @@ test("a protected diff section cut off before its header is still dropped", asyn
     details,
   );
   assert.equal(tail.content[0].text, `diff --git a/b.md b/b.md\n+ok\n${REMOVED(2)}\n\n${notice}`);
-  // codemode's copy of output over 1 MB keeps a head and a tail around an omission.
-  const cut =
-    "diff --git a/b.md b/b.md\n+ok\n\n[... 9 bytes omitted ...]\n\n+A3\ndiff --git a/c.md b/c.md\n+fine";
-  const both = g.result("bash", { command: "git diff" }, "x", { output: cut, truncated: true }, details);
-  assert.equal(
-    both.structuredContent.output,
-    `diff --git a/b.md b/b.md\n+ok\n\n[... 9 bytes omitted ...]\ndiff --git a/c.md b/c.md\n+fine\n${REMOVED(2)}`,
+  // codemode's copy of output over 1 MiB keeps a head and a tail around an omission.
+  const long = longOutput("0123", {
+    head: "diff --git a/b.md b/b.md\n",
+    middle: "diff --git a/vault/t.txt b/vault/t.txt\n+A1\n",
+    tail: "+A3\ndiff --git a/c.md b/c.md\n",
+    fill: "+ok",
+  });
+  const both = g.result(
+    "bash",
+    { command: "git diff" },
+    "x",
+    { output: long.copy, truncated: true },
+    long.details,
   );
+  assert.equal(both.structuredContent.output, `${long.copy.replace("\n+A3\n", "\n")}\n${REMOVED(1)}`);
   // The model reads the rest of the log in chunks.
   const chunk = g.result("read", { path: log, offset: 4 }, lines.slice(3).join("\n"));
   assert.equal(chunk.content[0].text, `diff --git a/b.md b/b.md\n+ok\n${REMOVED(2)}`);
@@ -715,8 +827,19 @@ test("cut-off output resumes inside a section opened on its last hidden line, wh
   );
   hidden(shown("read", { path: log, offset: 4 }, tail));
   // codemode's tail starts partway through a line, here one that looks like a commit line.
-  const cut = `${lines.slice(0, 2).join("\n")}\n\n[... 9 bytes omitted ...]\n\n0123abcd A1\n+A2\ndiff --git a/c.md b/c.md\n+fine`;
-  const copy = g.result("bash", { command: "git diff" }, "x", { output: cut, truncated: true }, details);
+  const over = longOutput("cccc", {
+    head: "diff --git a/b.md b/b.md\n",
+    middle: "diff --git a/vault/t.txt b/vault/t.txt\n+dead",
+    tail: "0123abcd A1\n+A2\ndiff --git a/c.md b/c.md\n",
+    fill: "+ok",
+  });
+  const copy = g.result(
+    "bash",
+    { command: "git diff" },
+    "x",
+    { output: over.copy, truncated: true },
+    over.details,
+  );
   assert.doesNotMatch(copy.structuredContent.output, /A1|A2/, "a partial first line after the omission");
   assert.match(copy.structuredContent.output, /c\.md/);
 });
@@ -1029,9 +1152,14 @@ test("tool output is filtered and redacted", async () => {
   );
   assert.equal(text("bash", { command: "printenv | sort" }, "OPENAI_API_KEY=sk"), `OPENAI_API_KEY=${MARK}`);
   assert.equal(
-    text("bash", { command: "printenv OPENAI_API_KEY" }, "sk-abc"),
-    MARK,
+    text("bash", { command: "printenv OPENAI_API_KEY" }, "sk-abc\n"),
+    `${MARK}\n`,
     "printenv prints only the value",
+  );
+  assert.equal(
+    text("read", { path: ".env" }, "VAULT=vault/x"),
+    "VAULT=vault/x",
+    "a secret file's line naming a protected path",
   );
   assert.equal(text("bash", { command: "printenv HOME" }, "/h"), "/h");
   assert.equal(

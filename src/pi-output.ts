@@ -14,8 +14,10 @@ const BASH_LOG = /^pi-bash-[0-9a-f]+\.log$/;
 // its notice under the tail it shows, saying where the tail starts and naming that file;
 const NOTICE =
   /^\[Showing (?:lines (\d+)-\d+ of \d+(?: \([^)\n]*\))?|last .+? of line (\d+) \(line is [^)\n]*\))\. Full output: (.+)\]$/;
-// where its copy for codemode leaves out the middle of output over 1 MB;
+// where its copy for codemode leaves out the middle of output over 1 MiB, the
+// copy keeping the file's first and last halves of that;
 const OMISSION = /^\[\.\.\. \d+ bytes omitted \.\.\.\]$/;
+const CODEMODE_BYTES = 1024 * 1024;
 // and its other lines after a tool's output: bash's exit status, and read's hints for reading on.
 const STATUS =
   /^(?:Command (?:exited with code \d+|aborted|timed out after \d+ seconds|terminated without an exit code)|\[(?:Showing lines \d+-\d+ of \d+(?: \([^)\n]*\))?|\d+ more lines in file)\. Use offset=\d+ to continue\.\])$/;
@@ -40,22 +42,29 @@ export const toolPath = (input: Record<string, unknown>) =>
   typeof input.path === "string" ? input.path.replace(/^@/, "") : undefined;
 
 /**
- * A file's lines, its path resolved as pi resolves a tool's: ~ expanded, or a
+ * A file's bytes, its path resolved as pi resolves a tool's: ~ expanded, or a
  * file URL taken as its path, then from cwd. None if it can't be read.
  */
-export function linesOf(path: string, cwd: string): string[] {
+function bytesOf(path: string, cwd: string): Buffer | undefined {
   try {
     const p = path.startsWith("file://") ? fileURLToPath(path) : expandHome(path);
-    return readFileSync(resolve(cwd, p), "utf8").split("\n");
+    return readFileSync(resolve(cwd, p));
   } catch {
-    return [];
+    return undefined;
   }
 }
 
-/** pi's notice in a line, if it names pi's own file: how many lines it left out of the head, and that file. */
-function notice(line: string): { hidden: number; log: string } | undefined {
+/** A file's lines, its path resolved as a tool's. None if it can't be read. */
+export const linesOf = (path: string, cwd: string) => bytesOf(path, cwd)?.toString("utf8").split("\n") ?? [];
+
+/** How pi cut a bash command's output for the model: the lines it left out of the head, whether the tail is the end of one long line, and the file that holds it all. */
+type Cut = { hidden: number; partial: boolean; log: string };
+
+/** pi's notice in a line, if it names pi's own file: how it cut the output. */
+function notice(line: string): Cut | undefined {
   const m = NOTICE.exec(line);
-  return m && isBashLog(m[3]) ? { hidden: Number(m[1] ?? m[2]) - 1, log: m[3] } : undefined;
+  if (!m || !isBashLog(m[3])) return undefined;
+  return { hidden: Number(m[1] ?? m[2]) - 1, partial: m[2] !== undefined, log: m[3] };
 }
 
 /**
@@ -73,15 +82,16 @@ function splitTrailer(text: string): [string, string] {
   }
 }
 
-/** How many lines pi left out of the head of a bash command's output, and the file that holds them all. */
-function bashCut(event: ToolOutput): { hidden: number; log: string } | undefined {
+/** How pi cut a bash command's output for the model, if it did. */
+function bashCut(event: ToolOutput): Cut | undefined {
   const d = event.details as {
-    truncation?: { totalLines?: number; outputLines?: number };
+    truncation?: { totalLines?: number; outputLines?: number; lastLinePartial?: boolean };
     fullOutputPath?: unknown;
   };
   if (typeof d?.fullOutputPath === "string") {
     return {
       hidden: (d.truncation?.totalLines ?? 0) - (d.truncation?.outputLines ?? 0),
+      partial: d.truncation?.lastLinePartial === true,
       log: d.fullOutputPath,
     };
   }
@@ -95,31 +105,79 @@ function bashCut(event: ToolOutput): { hidden: number; log: string } | undefined
     .findLast((n) => n !== undefined);
 }
 
-/** What pi left out of one copy of a tool's output: the lines before it starts, and those its omission marker may stand for. */
-export interface LeftOut {
-  head: string[];
-  middle?: string[];
+/**
+ * Where a copy of a tool's output sits in the whole of it: `before`, the
+ * whole's lines before the copy starts; `parts`, the copy's lines, by index,
+ * that hold only part of a line of the whole, with that line; and `omission`,
+ * where codemode's copy leaves out its middle: the index of its marker's line,
+ * and the whole's lines before the copy resumes.
+ */
+export interface Placement {
+  before: string[];
+  parts: Map<number, string>;
+  omission?: { at: number; before: string[] };
+}
+
+/** A copy that is all of a tool's output. */
+export const WHOLE: Placement = { before: [], parts: new Map() };
+
+const NL = 0x0a;
+
+/** How many lines of `buf` end before byte `end`. */
+function linesBefore(buf: Buffer, end: number): number {
+  let n = 0;
+  for (let i = buf.indexOf(NL); i >= 0 && i < end; i = buf.indexOf(NL, i + 1)) n++;
+  return n;
+}
+
+/** The line of `buf` that byte `i` (above 0) is in, the newline that ends it not counted. */
+function lineAt(buf: Buffer, i: number): string {
+  const end = buf.indexOf(NL, i);
+  return buf.subarray(buf.lastIndexOf(NL, i - 1) + 1, end < 0 ? buf.length : end).toString("utf8");
 }
 
 /**
- * What pi left out of each copy of a tool's output: `text`, what the model is
- * shown, and `structured`, codemode's copy. A read from an offset starts
- * partway through its file. A bash command's tail starts after lines only pi's
- * file of the full output holds, and codemode's copy of output over 1 MB leaves
- * out a middle part, which may be any of that file's lines.
+ * Where codemode's copy of a bash command's output sits in pi's file of it:
+ * over 1 MiB, it is the file's first half MiB, a blank line, the marker, a
+ * blank line and its last half MiB. Either half may hold part of a line at the
+ * cut. pi moves each cut to where a character starts, which keeps it in the
+ * same line, since no byte of a character but its first can be a newline.
  */
-export function leftOut(event: ToolOutput, cwd: string): { text: LeftOut; structured: LeftOut } {
+function codemodeCopy(log: Buffer, lines: string[]): Placement {
+  if (log.length <= CODEMODE_BYTES) return WHOLE;
+  const headEnd = CODEMODE_BYTES / 2;
+  const tailStart = log.length - (CODEMODE_BYTES - headEnd);
+  const at = linesBefore(log, headEnd) + 2;
+  const parts = new Map<number, string>();
+  if (log[headEnd - 1] !== NL) parts.set(at - 2, lineAt(log, headEnd - 1));
+  if (log[tailStart - 1] !== NL) parts.set(at + 2, lineAt(log, tailStart));
+  return { before: [], parts, omission: { at, before: lines.slice(0, linesBefore(log, tailStart)) } };
+}
+
+/**
+ * Where each copy of a tool's output sits in the whole of it: `text`, what the
+ * model is shown, and `structured`, codemode's copy. A read from an offset
+ * starts partway through its file. A bash command's tail starts after lines
+ * only pi's file of the full output holds, partway through a line when its one
+ * line is too long, and codemode's copy of output over 1 MiB leaves out a
+ * middle part.
+ */
+export function placeOf(event: ToolOutput, cwd: string): { text: Placement; structured: Placement } {
   if (event.toolName === "read") {
     const offset = typeof event.input.offset === "number" ? event.input.offset : 1;
-    const head = offset > 1 ? linesOf(toolPath(event.input) ?? "", cwd).slice(0, offset - 1) : [];
-    return { text: { head }, structured: { head } };
+    const before = offset > 1 ? linesOf(toolPath(event.input) ?? "", cwd).slice(0, offset - 1) : [];
+    const place = { before, parts: new Map() };
+    return { text: place, structured: place };
   }
   const cut = bashCut(event);
-  if (!cut) return { text: { head: [] }, structured: { head: [] } };
-  const lines = linesOf(cut.log, cwd);
+  const log = cut && bytesOf(cut.log, cwd);
+  if (!cut || !log) return { text: WHOLE, structured: WHOLE };
+  const lines = log.toString("utf8").split("\n");
+  const hidden = Math.max(0, cut.hidden);
+  const last = cut.partial ? lines[hidden] : undefined;
   return {
-    text: { head: lines.slice(0, Math.max(0, cut.hidden)) },
-    structured: { head: [], middle: lines },
+    text: { before: lines.slice(0, hidden), parts: new Map(last === undefined ? [] : [[0, last]]) },
+    structured: codemodeCopy(log, lines),
   };
 }
 

@@ -9,11 +9,12 @@ import { createBashToolDefinition, createReadToolDefinition } from "@earendil-wo
 import {
   isBashLog,
   isOmission,
-  leftOut,
   linesOf,
   patchResult,
+  placeOf,
   type ToolOutput,
   toolPath,
+  WHOLE,
 } from "../src/pi-output.ts";
 import { fixtures } from "./guard-harness.ts";
 
@@ -61,9 +62,9 @@ test("a long bash output: its tail, pi's notice under it, and its file of the wh
   assert.ok(isBashLog(log));
   assert.ok(!isBashLog(join(fixtures, "notes.log")));
   assert.ok(textOf(out).startsWith("1001\n"));
-  const left = leftOut(out, fixtures);
-  assert.deepEqual(left.text.head, numbers(1, 1000), "the lines before the tail");
-  assert.deepEqual(left.structured, { head: [], middle: linesOf(log, fixtures) });
+  const place = placeOf(out, fixtures);
+  assert.deepEqual(place.text, { before: numbers(1, 1000), parts: new Map() }, "the lines before the tail");
+  assert.equal(place.structured, WHOLE, "codemode's copy, under 1 MiB, is all of it");
   const notice = `\n\n[Showing lines 1001-3000 of 3000. Full output: ${log}]`;
   assert.ok(textOf(out).endsWith(notice));
   const patched = patchResult(out, digits);
@@ -80,14 +81,27 @@ test("a command that timed out: its result keeps only the text, whose notice say
   assert.deepEqual(out.details, {});
   const trailer = `\n\n[Showing lines 1001-3000 of 3000. Full output: ${log}]\n\nCommand timed out after 1 seconds`;
   assert.ok(textOf(out).endsWith(trailer));
-  assert.deepEqual(leftOut(out, fixtures).text.head, numbers(1, 1000));
+  assert.deepEqual(placeOf(out, fixtures).text.before, numbers(1, 1000));
   assert.ok(textOf(patchResult(out, digits)).endsWith(trailer), "pi's lines stay");
+});
+
+test("a tail of one long line is its end, and pi's notice says so", async (t) => {
+  const line = `API_KEY=${"7".repeat(60_000)}`;
+  for (const command of [`printf '%s\\n%s' 1 '${line}'`, `printf '%s\\n%s' 1 '${line}'; sleep 5`]) {
+    const out = await run("bash", { command, timeout: 1 }, fixtures);
+    logOf(t, out);
+    const place = placeOf(out, fixtures).text;
+    assert.deepEqual(place.before, ["1"], command);
+    assert.equal(place.parts.get(0), line, "the whole of the line the tail is part of");
+    const tail = textOf(out).split("\n")[0];
+    assert.ok(tail.length < line.length && line.endsWith(tail));
+  }
 });
 
 test("a failed command's exit status is pi's", async () => {
   const out = await run("bash", { command: "echo 1; exit 3" }, fixtures);
   assert.equal(textOf(out), "1\n\n\nCommand exited with code 3");
-  assert.deepEqual(leftOut(out, fixtures).text, { head: [] }, "nothing was cut");
+  assert.deepEqual(placeOf(out, fixtures), { text: WHOLE, structured: WHOLE }, "nothing was cut");
   assert.equal(textOf(patchResult(out, digits)), "#\n\n\nCommand exited with code 3");
 });
 
@@ -97,12 +111,30 @@ test("codemode's copy of bash output is the bare output, with no lines of pi's",
   assert.equal(copy.output, "COMMAND EXITED WITH CODE 9");
 });
 
-test("codemode's copy of output over 1 MB leaves out its middle", async (t) => {
-  const out = await run("bash", { command: "yes 0123456789 | head -n 110000" }, fixtures);
-  logOf(t, out);
-  const copy = out.structuredContent as { output: string; truncated: boolean };
-  assert.ok(copy.truncated);
-  assert.equal(copy.output.split("\n").filter(isOmission).length, 1);
+test("codemode's copy of output over 1 MiB leaves out its middle, at a place known to the byte", async (t) => {
+  // seq's lines differ, so each matches one place; é's cut is inside a character.
+  for (const command of ["seq 1 200000", "yes 'héllo wörld' | head -n 100000"]) {
+    const out = await run("bash", { command }, fixtures);
+    const log = linesOf(logOf(t, out), fixtures);
+    const copy = (out.structuredContent as { output: string; truncated: boolean }).output.split("\n");
+    const { before, parts, omission } = placeOf(out, fixtures).structured;
+    assert.ok(omission, command);
+    const { at } = omission;
+    assert.deepEqual([copy[at - 1], isOmission(copy[at]), copy[at + 1]], ["", true, ""], "the marker's line");
+    assert.equal(copy.filter(isOmission).length, 1);
+    assert.deepEqual(before, []);
+    // The head is the log's first lines, the last of them cut short.
+    assert.deepEqual(copy.slice(0, at - 2), log.slice(0, at - 2));
+    assert.equal(parts.get(at - 2), log[at - 2]);
+    assert.ok(log[at - 2].startsWith(copy[at - 2]) && copy[at - 2] !== log[at - 2]);
+    // The tail resumes partway through the line after `before`, and runs to the end.
+    const resume = omission.before.length;
+    assert.deepEqual(omission.before, log.slice(0, resume));
+    assert.equal(parts.get(at + 2), log[resume]);
+    assert.ok(log[resume].endsWith(copy[at + 2]) && copy[at + 2] !== log[resume]);
+    assert.deepEqual(copy.slice(at + 3), log.slice(resume + 1));
+    assert.deepEqual([...parts.keys()], [at - 2, at + 2]);
+  }
   assert.ok(!isOmission("[... many bytes omitted ...]"));
 });
 
@@ -113,10 +145,8 @@ test("a read from an offset, and pi's hints for reading on", async (t) => {
   const out = await run("read", { path: "f.txt", offset: 4, limit: 3 }, dir);
   const hint = "\n\n[4 more lines in file. Use offset=7 to continue.]";
   assert.equal(textOf(out), `4\n5\n6${hint}`);
-  assert.deepEqual(leftOut(out, dir), {
-    text: { head: ["1", "2", "3"] },
-    structured: { head: ["1", "2", "3"] },
-  });
+  const place = { before: ["1", "2", "3"], parts: new Map() };
+  assert.deepEqual(placeOf(out, dir), { text: place, structured: place });
   const patched = patchResult(out, digits);
   assert.equal(textOf(patched), `#\n#\n#${hint}`);
   assert.equal(patched?.structuredContent, `#\n#\n#${hint}`, "read's copy is its text, with pi's lines");
@@ -151,8 +181,8 @@ test("a read's path, as pi takes it: @ dropped, then ~ expanded, or a file URL",
   const out = await run("read", { path: "@~/f.txt", offset: 3 }, fixtures);
   assert.equal(textOf(out), "3\n4", "pi read it");
   assert.equal(toolPath(out.input), "~/f.txt");
-  assert.deepEqual(leftOut(out, fixtures).text.head, ["1", "2"]);
+  assert.deepEqual(placeOf(out, fixtures).text.before, ["1", "2"]);
   const url = await run("read", { path: pathToFileURL(join(home, "f.txt")).href, offset: 3 }, fixtures);
   assert.equal(textOf(url), "3\n4", "pi read it");
-  assert.deepEqual(leftOut(url, fixtures).text.head, ["1", "2"]);
+  assert.deepEqual(placeOf(url, fixtures).text.before, ["1", "2"]);
 });
