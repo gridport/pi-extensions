@@ -31,7 +31,7 @@
  */
 import { realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { isAbsolute, resolve } from "node:path";
+import { isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { expandHome, realOrSame } from "../src/paths.ts";
@@ -134,22 +134,29 @@ const inNamed = (p: string, root: string, names: string[]) =>
  * Whether a recursive delete can remove a target without asking: it lies
  * inside a temp directory, and not at its root, or is or lies inside a folder
  * named in `folders`, below the session's folder. Either is judged on the path
- * and on where its symlinks lead, and a glob by the part before it. A relative
- * target counts only when the command changes no directory: pi runs each
- * command from the session's folder.
+ * and on where its symlinks lead. A glob counts only in a path's last part,
+ * where what it matches lies inside the folder before it. A relative target
+ * counts only when the command changes no directory: pi runs each command from
+ * the session's folder.
  */
 function exempt(t: string, cwd: string, changesDir: boolean, folders: string[]): boolean {
   // A variable, a substitution or a brace expansion could point anywhere.
   if (/[$`{]/.test(t)) return false;
-  // So could .. after a glob, which the stem below leaves out.
-  const glob = t.search(/[*?[]/);
-  if (glob >= 0 && t.slice(glob).split("/").includes("..")) return false;
-  const stem = expandHome(t).split(/[*?[]/)[0];
+  const path = expandHome(t);
+  // So could .., which resolve() takes as text, past any symlink before it.
+  if (path.split("/").includes("..")) return false;
+  const glob = path.search(/[*?[]/);
+  const last = path.slice(path.lastIndexOf("/") + 1);
+  // A glob in an earlier part may pass through symlinks, and .* matches .. in bash 3.2.
+  if (glob >= 0 && (path.indexOf("/", glob) >= 0 || /^[.[]/.test(last))) return false;
+  const stem = glob < 0 ? path : path.slice(0, path.length - last.length);
   if (!stem || (!isAbsolute(stem) && changesDir)) return false;
   const abs = resolve(cwd, stem);
-  const real = realOrSame(abs);
-  if (underTemp(abs) && underTemp(real)) return true;
-  return inNamed(abs, resolve(cwd), folders) && inNamed(real, realOrSame(resolve(cwd)), folders);
+  // A glob's matches are entries of its folder, so an entry of it is judged.
+  const entry = (p: string) => (glob < 0 ? p : join(p, "\0"));
+  const [full, real] = [entry(abs), entry(realOrSame(abs))];
+  if (underTemp(full) && underTemp(real)) return true;
+  return inNamed(full, resolve(cwd), folders) && inNamed(real, realOrSame(resolve(cwd)), folders);
 }
 
 /**
@@ -211,6 +218,14 @@ function findStarts(argv: string[]): string[] {
   return starts.length ? starts : ["."];
 }
 
+/** What a deleting find deletes: its starts, and what each rm it runs names besides the match ({}). */
+function findTargets(argv: string[], runs: ReturnType<typeof programOf>[]): string[] {
+  const named = runs
+    .filter((r) => r.name === "rm")
+    .flatMap((r) => operands(r.argv).filter((t) => t !== "{}"));
+  return [...findStarts(argv), ...named];
+}
+
 function argMatches(spec: string, tok: string): boolean {
   if (tok === spec) return true;
   if (/^--[^=]+$/.test(spec) && tok.startsWith(`${spec}=`)) return true;
@@ -243,14 +258,18 @@ export function check(line: string, cwd: string, cfg: Config): string[] {
       reasons.push("runs as root");
     if (!argv.length) continue;
     if (cfg.builtins.includes("rm") && name === "rm" && recursive(argv)) {
-      reasons.push(deleteReason("deletes recursively", operands(argv), cwd, changesDir, cfg));
+      // xargs adds what it reads to the operands, so they can't be judged.
+      const targets = wrappers.includes("xargs") ? [] : operands(argv);
+      reasons.push(deleteReason("deletes recursively", targets, cwd, changesDir, cfg));
     }
     if (
       cfg.builtins.includes("find") &&
       name === "find" &&
       (argv.includes("-delete") || runs.some((r) => r.name === "rm"))
     ) {
-      reasons.push(deleteReason("deletes the files find matches", findStarts(argv), cwd, changesDir, cfg));
+      reasons.push(
+        deleteReason("deletes the files find matches", findTargets(argv, runs), cwd, changesDir, cfg),
+      );
     }
     for (const rule of cfg.rules) {
       if (ruleMatches(rule, argv))

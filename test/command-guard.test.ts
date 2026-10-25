@@ -136,9 +136,24 @@ test("folders named in allowFolders need no OK, from the session's folder down",
     "the session's own folder",
   );
   assert.deepEqual(ask(`rm -rf ${proj}-old/dist`), ["deletes recursively"], "a folder its name starts");
-  assert.deepEqual(ask("rm -rf packages/*/dist"), [
-    "deletes recursively, and packages/*/dist is a glob, so what it deletes depends on what is there",
+  const glob = (does: string, t: string) => [
+    `${does}, and ${t} is a glob, so what it deletes depends on what is there`,
+  ];
+  // A glob counts only in the last part, inside an allowed folder.
+  assert.deepEqual(ask("rm -rf packages/*/dist"), glob("deletes recursively", "packages/*/dist"));
+  assert.deepEqual(ask("rm -rf dist/*/cache"), glob("deletes recursively", "dist/*/cache"));
+  assert.deepEqual(ask("rm -rf dist*"), glob("deletes recursively", "dist*"), "it matches distribution/ too");
+  assert.deepEqual(ask("rm -rf ./dist?*"), glob("deletes recursively", "./dist?*"));
+  // bash 3.2, macOS's, matches .. with .*.
+  assert.deepEqual(ask("find dist/.* -delete"), glob("deletes the files find matches", "dist/.*"));
+  // Through a symlink, as a pnpm workspace link is, .. leads elsewhere.
+  assert.deepEqual(ask("rm -rf node_modules/@s/pkg/../shared"), ["deletes recursively"]);
+  // Operands the command adds or names past find's starts.
+  assert.deepEqual(ask("echo src | xargs rm -rf node_modules"), ["deletes recursively"]);
+  assert.deepEqual(ask("find node_modules -maxdepth 0 -exec rm -rf src \\;"), [
+    "deletes the files find matches",
   ]);
+  assert.deepEqual(ask("find node_modules -name x -exec rm -rf {} +"), []);
   // A symlink is judged by where it leads.
   const dir = mkdtempSync(join(tmpdir(), "command-guard-"));
   try {
