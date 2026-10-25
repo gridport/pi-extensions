@@ -30,7 +30,8 @@ mutant() { # file name from to
 		bad=1
 		return
 	fi
-	out=$(cd "$work" && GUARD_TEST_FIXTURES="$work/fixtures" node --test test/*.test.ts 2>&1)
+	# Node 22 reports in TAP when its output isn't a terminal; the grep reads spec.
+	out=$(cd "$work" && GUARD_TEST_FIXTURES="$work/fixtures" node --test --test-reporter=spec test/*.test.ts 2>&1)
 	rc=$?
 	failed=$(printf '%s\n' "$out" | grep -E '^✖ ' | grep -v 'failing tests' | sed 's/ ([0-9.]*ms)$//' | sort -u | tr '\n' ';')
 	if [ $rc -eq 1 ] && [ -n "$failed" ]; then
