@@ -1,0 +1,64 @@
+{
+  "name": "@gridport/pi-extensions",
+  "version": "0.1.0",
+  "description": "pi extensions: a cron loop, a secret guard and a command guard",
+  "type": "module",
+  "license": "MIT",
+  "author": {
+    "name": "Weiliang Li",
+    "email": "to.be.impressive@gmail.com",
+    "url": "https://github.com/kigawas"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/gridport/pi-extensions.git"
+  },
+  "homepage": "https://github.com/gridport/pi-extensions#readme",
+  "bugs": "https://github.com/gridport/pi-extensions/issues",
+  "keywords": [
+    "pi-package",
+    "pi",
+    "pi-coding-agent",
+    "extension"
+  ],
+  "files": [
+    "extensions",
+    "src",
+    "CHANGELOG.md"
+  ],
+  "pi": {
+    "extensions": [
+      "./extensions/loop.ts",
+      "./extensions/secret-guard.ts",
+      "./extensions/command-guard.ts"
+    ]
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "packageManager": "pnpm@12.15.0+sha512.b3951d6d6ff4a9f13dc7cf56cd28d2b8eb37dbcc9c68e52e1e1191873ea9f82a017287ab50baadc5ccc494f036c67c0e47eb13608c2fa36f47711b61ea128e61",
+  "scripts": {
+    "check": "biome check && tsc",
+    "check:fix": "biome check --fix",
+    "test": "node --test test/*.test.ts",
+    "test:mutants": "test/mutants.sh",
+    "test:pack": "test/pack.sh",
+    "test:live": "test/live.sh"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*",
+    "typebox": "*"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "2.6.2",
+    "@earendil-works/pi-ai": "1.4.0",
+    "@earendil-works/pi-coding-agent": "1.4.0",
+    "@types/node": "22.20.5",
+    "typebox": "1.3.27",
+    "typescript": "7.0.2"
+  }
+}
