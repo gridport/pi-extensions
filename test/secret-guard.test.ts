@@ -394,6 +394,18 @@ test("an END with no BEGIN drops lines back only to where a block could have ope
   );
 });
 
+test("an END that names a protected path still drops its block's lines", () => {
+  // As tail -n 3 of a .env prints a key's last lines, under a note of where it came from.
+  const shown = filter({ protect: true, redact: "all" });
+  assert.equal(
+    shown("MIIEbody1\nMIIEbody2\n-----END PRIVATE KEY----- (a copy of vault/id.pem)\nB=2"),
+    `B=2\n${REMOVED(1)}`,
+  );
+  // Not in output that isn't redacted throughout, which shows a key's lines anyway.
+  const plain = "MIIEbody1\n-----END PRIVATE KEY-----\nB=2";
+  assert.equal(drop(plain), plain);
+});
+
 test("around codemode's marker, an END drops back as far as a full pass would", () => {
   const marker = "[... 99 bytes omitted ...]";
   const place = (at: number, before: string[], parts = new Map<number, string>()): Placement => ({
@@ -408,6 +420,15 @@ test("around codemode's marker, an END drops back as far as a full pass would", 
     drop(
       [header, "@@ -1,9 +1,9 @@", "+MIIEhead1", "+MIIEhead2", "", marker, "", "+B=2"].join("\n"),
       place(5, [header, "@@ -1,9 +1,9 @@", "+MIIEhead1", "+MIIEhead2", "+MIIEmid", end]),
+    ),
+    [header, "@@ -1,9 +1,9 @@", "", marker, "", "+B=2"].join("\n"),
+  );
+  // The same where the head ends at a newline, so its last line is the empty
+  // start of the END, the first line left out.
+  assert.equal(
+    drop(
+      [header, "@@ -1,9 +1,9 @@", "+MIIEhead1", "+MIIEhead2", "", "", marker, "", "+B=2"].join("\n"),
+      place(6, [header, "@@ -1,9 +1,9 @@", "+MIIEhead1", "+MIIEhead2", end]),
     ),
     [header, "@@ -1,9 +1,9 @@", "", marker, "", "+B=2"].join("\n"),
   );
@@ -1179,6 +1200,18 @@ test("pi's log of a protected diff can be read only with read", async () => {
     const r = await g.call(tool, input);
     assert.equal(r?.block, true, `${tool} ${JSON.stringify(input)}`);
     assert.match(r.reason, /read tool/);
+  }
+  // Named from where a cd moves the command, or by its name alone, where pi
+  // writes its files.
+  const moved = await g.call("bash", { command: `cd ${root} && tail -n 3 pi-bash-cccc.log` });
+  assert.equal(moved?.block, true, "after a cd");
+  const named = join(tmpdir(), "pi-bash-cdcd.log");
+  writeFileSync(named, "diff --git a/vault/t.txt b/vault/t.txt\n+A1");
+  try {
+    const bare = await g.call("bash", { command: "cd $LOGS && tail -n 3 pi-bash-cdcd.log" });
+    assert.equal(bare?.block, true, "by its name, where pi keeps it");
+  } finally {
+    rmSync(named);
   }
   assert.equal(await g.call("read", { path: log, offset: 2 }), undefined);
   assert.equal(

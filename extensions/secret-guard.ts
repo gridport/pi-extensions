@@ -38,6 +38,7 @@
  * names a protected folder can still print the files inside it.
  */
 import { readdirSync, realpathSync, statSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ExtensionAPI, ExtensionContext, ToolResultEvent } from "@earendil-works/pi-coding-agent";
@@ -152,6 +153,9 @@ export function protectedPath(
   return undefined;
 }
 
+/** The folders a bash line may work in: the session's, and those it moves to. */
+const workDirs = (cwd: string, dirs: string[]) => [cwd, ...dirs.map((dir) => resolve(cwd, expandHome(dir)))];
+
 /**
  * The protected folder a bash command names, if any. Each word is resolved
  * against the working directory, so a session inside a protected folder has
@@ -163,8 +167,7 @@ export function bashHit(
   folders: string[],
   paths = pathsOf(command),
 ): string | undefined {
-  // The folders the line may work in: the session's, and those it moves to.
-  const bases = [cwd, ...paths.dirs.map((dir) => resolve(cwd, expandHome(dir)))];
+  const bases = workDirs(cwd, paths.dirs);
   for (const part of paths.parts) {
     const hit = protectedPath(part, cwd, folders, bases);
     if (hit) return hit;
@@ -454,13 +457,17 @@ export function filterOutput(text: string, cfg: Config, how: Filter, place: Plac
     const [role, next] = step(state, full, kind);
     state = next;
     const long = full !== line && full.length > LONGEST;
+    // Where a key's lines are dropped, an END with no BEGIN drops the lines
+    // back to where its block may have opened, even one that is itself
+    // removed for naming a protected path.
+    if (role === "end" && (how.redact === "all" || state.section === "secret")) dropBack();
     let fate: string | undefined;
     if (state.section === "protected" || (!long && names(full))) removed++;
     else if (how.redact !== "all" && state.section !== "secret") fate = long ? MARK : redactMatch(full, cfg);
-    else if (role === "end") dropBack();
     else if (role === "hunk" && state.section === "secret") fate = HUNK.exec(full)?.[0];
-    else if (long && role !== "key") fate = MARK;
-    else if (role !== "key") {
+    else if (role === "key" || role === "end") fate = undefined;
+    else if (long) fate = MARK;
+    else {
       const m = redactMatch(full, cfg);
       fate = redactLine(m.replace(role === "begin" ? PEM_REST : PEM_INLINE, MARK), cfg.redactKeys);
     }
@@ -512,14 +519,18 @@ function writesMark(command: string, cfg: Config): boolean {
 }
 
 /**
- * Whether a path is pi's file of a bash command's full output, holding a
- * protected file's diff section. Only read, whose offset says where it starts,
- * can show part of one safely.
+ * Whether a path, from any of `bases`, is pi's file of a bash command's full
+ * output, holding a protected file's diff section. Only read, whose offset says
+ * where it starts, can show part of one safely.
  */
-function guardedLog(p: string, cwd: string, folders: string[]): boolean {
+function guardedLog(p: string, bases: string[], folders: string[]): boolean {
   if (!isBashLog(p)) return false;
-  for (const line of linesOf(p, cwd)) if (opensSection(line, folders)) return true;
-  return false;
+  const holds = (path: string, cwd: string) => {
+    for (const line of linesOf(path, cwd)) if (opensSection(line, folders)) return true;
+    return false;
+  };
+  // From where the command works, and by its name where pi writes its files.
+  return bases.some((b) => holds(p, b)) || holds(base(p), tmpdir());
 }
 
 export default function (pi: ExtensionAPI) {
@@ -573,7 +584,8 @@ export default function (pi: ExtensionAPI) {
     // A bash command's paths, parsed once for both checks below.
     const paths = name === "bash" ? pathsOf(command) : undefined;
     const named = name === "grep" ? [path] : (paths?.parts ?? []);
-    if (named.some((p) => guardedLog(p, ctx.cwd, cfg.folders))) {
+    const bases = workDirs(ctx.cwd, paths?.dirs ?? []);
+    if (named.some((p) => guardedLog(p, bases, cfg.folders))) {
       return {
         block: true,
         reason:
