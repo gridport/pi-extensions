@@ -2,7 +2,7 @@ name: CD
 
 # Publishing a GitHub release stages that version on npm through trusted
 # publishing: npm accepts this workflow's OIDC token, so no npm token is stored.
-# The trusted publisher may only stage, so the version goes live once a
+# It stages rather than publishes, so the version goes live only once a
 # maintainer approves it with 2FA, on npmjs.com or with `npm stage approve`.
 # The release tag must be v<version in package.json>.
 
