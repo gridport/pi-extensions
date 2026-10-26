@@ -1,6 +1,6 @@
 {
   "name": "@gridport/pi-extensions",
-  "version": "0.0.1",
+  "version": "0.1.0",
   "description": "pi extensions: a cron loop, a secret guard and a command guard",
   "type": "module",
   "license": "MIT",
