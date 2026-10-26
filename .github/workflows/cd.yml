@@ -1,7 +1,9 @@
 name: CD
 
-# Publishing a GitHub release publishes that version to npm through trusted
+# Publishing a GitHub release stages that version on npm through trusted
 # publishing: npm accepts this workflow's OIDC token, so no npm token is stored.
+# The trusted publisher may only stage, so the version goes live once a
+# maintainer approves it with 2FA, on npmjs.com or with `npm stage approve`.
 # The release tag must be v<version in package.json>.
 
 on:
@@ -11,6 +13,8 @@ on:
 jobs:
   publish:
     runs-on: ubuntu-latest
+    # npm's trusted publisher names this environment, and accepts no other.
+    environment: npm
     permissions:
       contents: read
       id-token: write
@@ -25,13 +29,13 @@ jobs:
       - name: The tag matches the version
         run: |
           test "v$(node -p 'require("./package.json").version')" = "$GITHUB_REF_NAME"
-      - name: npm can use trusted publishing (11.5.1 or later)
+      - name: npm can stage (11.15.0 or later)
         run: |
-          node -e 'const [a, b, c] = process.argv[1].split(".").map(Number); process.exit(a > 11 || (a === 11 && (b > 5 || (b === 5 && c >= 1))) ? 0 : 1)' "$(npm --version)"
+          node -e 'const [a, b] = process.argv[1].split(".").map(Number); process.exit(a > 11 || (a === 11 && b >= 15) ? 0 : 1)' "$(npm --version)"
 
       - run: pnpm install --frozen-lockfile
       - run: pnpm check
       - run: pnpm test
       - run: pnpm test:mutants
       - run: pnpm test:pack
-      - run: npm publish
+      - run: npm stage publish

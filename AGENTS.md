@@ -18,11 +18,11 @@ One npm package, `@gridport/pi-extensions`, holding three pi extensions in `exte
 
 ## Releases
 
-- Bump `version` in `package.json`, and move the `CHANGELOG.md` notes under it. Then publish a GitHub release tagged `v<version>`. `.github/workflows/cd.yml` checks the tag, runs the checks, and publishes through npm trusted publishing.
+- Bump `version` in `package.json`, and move the `CHANGELOG.md` notes under it. Then publish a GitHub release tagged `v<version>`. `.github/workflows/cd.yml` checks the tag, runs the checks, and stages the version through npm trusted publishing. The trusted publisher may only stage, so the version goes live once the user approves it with 2FA, on npmjs.com or with `npm stage approve <id>`.
 - Trusted publishing can't create a package, so the first one is a bootstrap:
   1. Publish 0.0.1 by hand from the committed tree (`npm publish`, with 2FA). It has no provenance.
   2. On npmjs.com, add `gridport/pi-extensions` with `cd.yml` as the package's trusted publisher.
-  3. Release 0.1.0 through `cd.yml`.
+  3. Release 0.1.0 through `cd.yml`, and approve the staged version.
   4. Run `npm deprecate @gridport/pi-extensions@0.0.1 "use 0.1.0 or later"`.
 
 ## GitHub
