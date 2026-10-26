@@ -127,9 +127,10 @@ test("what a line names that could be a path, and the folders it moves to", () =
 });
 
 test("a word of many brace groups expands at most 64 of them", () => {
+  // First, so a higher limit fails here, before the JSON below costs gigabytes.
+  const expanded = pathsOf("cat {a,b}{c,d}{e,f}{g,h}{i,j}{k,l}{m,n}/x").parts.filter((p) => p !== "cat");
+  assert.equal(expanded.length, 64, "the first 64 of 128 expansions");
   // Expanding every group of a JSON body this size would overflow the stack.
   const json = `curl -d '[${Array.from({ length: 10_000 }, (_, i) => `{"a":${i},"b":2}`)}]'`;
   assert.ok(pathsOf(json).parts.length > 0);
-  const expanded = pathsOf("cat {a,b}{c,d}{e,f}{g,h}{i,j}{k,l}{m,n}/x").parts.filter((p) => p !== "cat");
-  assert.equal(expanded.length, 64, "the first 64 of 128 expansions");
 });

@@ -31,7 +31,10 @@ mutant() { # file name from to
 		return
 	fi
 	# Node 22 reports in TAP when its output isn't a terminal; the grep reads spec.
-	out=$(cd "$work" && GUARD_TEST_FIXTURES="$work/fixtures" node --test --test-reporter=spec test/*.test.ts 2>&1)
+	# A mutant that runs a test process out of memory crashes it at 1 GB of heap
+	# (the tests need under 400 MB), not after taking down a CI runner.
+	out=$(cd "$work" && GUARD_TEST_FIXTURES="$work/fixtures" NODE_OPTIONS=--max-old-space-size=1024 \
+		node --test --test-reporter=spec test/*.test.ts 2>&1)
 	rc=$?
 	failed=$(printf '%s\n' "$out" | grep -E '^✖ ' | grep -v 'failing tests' | sed 's/ ([0-9.]*ms)$//' | sort -u | tr '\n' ';')
 	if [ $rc -eq 1 ] && [ -n "$failed" ]; then

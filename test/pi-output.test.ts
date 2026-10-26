@@ -56,6 +56,21 @@ const numbers = (from: number, to: number) =>
   Array.from({ length: to - from + 1 }, (_, i) => String(from + i));
 const digits = (s: string) => s.replace(/\d/g, "#");
 
+/**
+ * deepEqual for long arrays of lines. A failure names the first difference:
+ * deepEqual's diff of 200,000 lines takes gigabytes, which brought down CI's
+ * runners during a mutant run.
+ */
+function sameLines(actual: string[], expected: string[], what: string) {
+  for (let i = 0; i < Math.max(actual.length, expected.length); i++) {
+    if (actual[i] === expected[i]) continue;
+    const show = (s?: string) => JSON.stringify(s?.slice(0, 80));
+    assert.fail(
+      `${what}: line ${i} is ${show(actual[i])}, not ${show(expected[i])} (${actual.length} lines, not ${expected.length})`,
+    );
+  }
+}
+
 test("a long bash output: its tail, pi's notice under it, and its file of the whole", async (t) => {
   const out = await run("bash", { command: "seq 1 3000" }, fixtures);
   const log = logOf(t, out);
@@ -121,7 +136,7 @@ test("codemode's copy of output over 1 MiB leaves out its middle, at a place kno
     const { text, structured } = placeOf(out, fixtures);
     // The model's tail starts after lines that run past the first MiB the log is read in.
     const hidden = [...text.before];
-    assert.deepEqual(hidden, log.slice(0, hidden.length));
+    sameLines(hidden, log.slice(0, hidden.length), "the lines before the tail");
     assert.equal(log[hidden.length], textOf(out).split("\n")[0]);
     assert.ok(Buffer.byteLength(hidden.join("\n")) > 1024 * 1024);
     const { before, parts, omission } = structured;
@@ -131,16 +146,16 @@ test("codemode's copy of output over 1 MiB leaves out its middle, at a place kno
     assert.equal(copy.filter(isOmission).length, 1);
     assert.deepEqual([...before], []);
     // The head is the log's first lines, the last of them cut short.
-    assert.deepEqual(copy.slice(0, at - 2), log.slice(0, at - 2));
+    sameLines(copy.slice(0, at - 2), log.slice(0, at - 2), "the head");
     assert.equal(parts.get(at - 2), log[at - 2]);
     assert.ok(log[at - 2].startsWith(copy[at - 2]) && copy[at - 2] !== log[at - 2]);
     // The tail resumes partway through the line after `before`, and runs to the end.
     const resumed = [...omission.before];
     const resume = resumed.length;
-    assert.deepEqual(resumed, log.slice(0, resume));
+    sameLines(resumed, log.slice(0, resume), "the lines left out");
     assert.equal(parts.get(at + 2), log[resume]);
     assert.ok(log[resume].endsWith(copy[at + 2]) && copy[at + 2] !== log[resume]);
-    assert.deepEqual(copy.slice(at + 3), log.slice(resume + 1));
+    sameLines(copy.slice(at + 3), log.slice(resume + 1), "the tail");
     assert.deepEqual([...parts.keys()], [at - 2, at + 2]);
   }
   assert.ok(!isOmission("[... many bytes omitted ...]"));
